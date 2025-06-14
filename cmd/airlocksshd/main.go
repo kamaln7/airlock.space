@@ -13,7 +13,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -79,22 +78,11 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	// The recommended way to use these styles is to then pass them down to
 	// your Bubble Tea model.
 	renderer := bubbletea.MakeRenderer(s)
-	txtStyle := renderer.NewStyle().Foreground(lipgloss.Color("10"))
-	quitStyle := renderer.NewStyle().Foreground(lipgloss.Color("8"))
 
-	bg := "light"
-	if renderer.HasDarkBackground() {
-		bg = "dark"
-	}
-
-	m := airlockspace.Model{
-		Term:      pty.Term,
-		Profile:   renderer.ColorProfile().Name(),
-		Width:     pty.Window.Width,
-		Height:    pty.Window.Height,
-		Bg:        bg,
-		TxtStyle:  txtStyle,
-		QuitStyle: quitStyle,
+	m := &airlockspace.Model{
+		Width:  pty.Window.Width,
+		Height: pty.Window.Height,
+		Style:  renderer.NewStyle(),
 	}
 	return m, []tea.ProgramOption{tea.WithAltScreen()}
 }

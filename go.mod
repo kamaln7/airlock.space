@@ -3,11 +3,14 @@ module github.com/kamaln7/airlock.space
 go 1.24.3
 
 require (
+	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.5
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/log v0.4.2
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
 	github.com/charmbracelet/wish v1.4.7
+	github.com/kamaln7/resolvable v0.0.0-20250612203940-5b849c87b049
+	github.com/peteretelej/nasa v0.0.0-20181219221121-7a9680211873
 )
 
 require (

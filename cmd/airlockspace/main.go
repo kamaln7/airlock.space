@@ -18,20 +18,8 @@ const (
 )
 
 func main() {
-	renderer := lipgloss.NewRenderer(os.Stdout)
-	txtStyle := renderer.NewStyle().Foreground(lipgloss.Color("10"))
-	quitStyle := renderer.NewStyle().Foreground(lipgloss.Color("8"))
-
-	bg := "light"
-	if renderer.HasDarkBackground() {
-		bg = "dark"
-	}
-
-	m := airlockspace.Model{
-		Profile:   renderer.ColorProfile().Name(),
-		Bg:        bg,
-		TxtStyle:  txtStyle,
-		QuitStyle: quitStyle,
+	m := &airlockspace.Model{
+		Style: lipgloss.NewRenderer(os.Stdout).NewStyle(),
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
