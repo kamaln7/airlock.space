@@ -5,6 +5,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -173,14 +174,7 @@ func (m *Model) viewAPOD() string {
 		}
 		converter := convert.NewImageConverter()
 
-		// resize the smaller dimension to fit the free width or height
-		// the other dimension being set to 0 will maintain the aspect ratio
-		var imageWidth, imageHeight int
-		if image.Bounds().Dx() > image.Bounds().Dy() {
-			imageWidth = freeWidth
-		} else {
-			imageHeight = freeHeight
-		}
+		imageWidth, imageHeight := fitImage(image.Bounds().Dx(), image.Bounds().Dy(), freeWidth, freeHeight)
 		asciiImage := converter.Image2ASCIIString(image, &convert.Options{
 			Colored:     true,
 			FixedWidth:  imageWidth,
@@ -309,6 +303,7 @@ func (v *apodView) View() string {
 
 	if v.writeExplanation {
 		s.WriteString(txt.Render(wordwrap.String(v.apod.Explanation, v.width)))
+		s.WriteString("\n")
 	}
 
 	return s.String()
@@ -325,4 +320,25 @@ func colorize(style lipgloss.Style, str string, colors ...lipgloss.TerminalColor
 		s.WriteString(style.Foreground(color).Render(string(char)))
 	}
 	return s.String()
+}
+
+// fitImage calculates the new dimensions for an image to fit within a container
+// while maintaining the original aspect ratio.
+func fitImage(imageWidth, imageHeight, containerWidth, containerHeight int) (int, int) {
+	if imageWidth <= 0 || imageHeight <= 0 || containerWidth <= 0 || containerHeight <= 0 {
+		return 0, 0
+	}
+
+	// Calculate scale factors for both dimensions
+	scaleX := float64(containerWidth) / float64(imageWidth)
+	scaleY := float64(containerHeight) / float64(imageHeight)
+
+	// Use the smaller scale factor to ensure the image fits within the container
+	scale := math.Min(scaleX, scaleY)
+
+	// Calculate new dimensions
+	newWidth := int(math.Round(float64(imageWidth) * scale))
+	newHeight := int(math.Round(float64(imageHeight) * scale))
+
+	return newWidth, newHeight
 }
