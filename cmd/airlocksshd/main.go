@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -38,25 +39,38 @@ func main() {
 		),
 	)
 	if err != nil {
-		log.Error("Could not start server", "error", err)
+		log.Fatal("could not create server", "error", err)
 	}
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	log.Info("Starting SSH server", "host", host, "port", port)
 	go func() {
-		if err = s.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
-			log.Error("Could not start server", "error", err)
+		var err error
+		if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
+			// systemd run
+			f := os.NewFile(3, "from systemd")
+			l, err := net.FileListener(f)
+			if err != nil {
+				log.Fatal("could not create listener", "error", err)
+			}
+			log.Info("starting SSH server", "socket", "fd:3")
+			err = s.Serve(l)
+		} else {
+			log.Info("starting SSH server", "host", host, "port", port)
+			err = s.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			log.Error("error starting server", "error", err)
 			done <- nil
 		}
 	}()
 
 	<-done
-	log.Info("Stopping SSH server")
+	log.Info("stopping SSH server")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer func() { cancel() }()
 	if err := s.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
-		log.Error("Could not stop server", "error", err)
+		log.Error("could not stop server", "error", err)
 	}
 }
 
