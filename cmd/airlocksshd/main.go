@@ -22,15 +22,15 @@ import (
 	airlockspace "github.com/kamaln7/airlock.space"
 )
 
-const (
-	host = "localhost"
-	port = "23234"
+var (
+	host = GetEnv("SSH_HOST", "localhost")
+	port = GetEnv("SSH_PORT", "23234")
 )
 
 func main() {
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
-		// wish.WithHostKeyPath(".ssh/id_ed25519"),
+		wish.WithHostKeyPath(GetEnv("SSH_HOST_KEY", ".airlocksshd/id_ed25519")),
 		wish.WithMiddleware(
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY.
@@ -85,4 +85,12 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		Style:  renderer.NewStyle(),
 	}
 	return m, []tea.ProgramOption{tea.WithAltScreen()}
+}
+
+func GetEnv(name, fallback string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
