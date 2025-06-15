@@ -1,6 +1,8 @@
 package airlockspace
 
 import (
+	_ "image/jpeg"
+	_ "image/png"
 	"log/slog"
 	"regexp"
 	"slices"
@@ -15,7 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/muesli/reflow/wordwrap"
-	"github.com/peteretelej/nasa"
+	"github.com/qeesung/image2ascii/convert"
 	"github.com/samber/lo"
 	lom "github.com/samber/lo/mutable"
 )
@@ -35,7 +37,8 @@ type Model struct {
 	Height           int
 	Style            lipgloss.Style
 	State            State
-	apod             *nasa.Image
+	imgOrExplanation bool // true -> img, false -> explanation
+	apod             *apod.APOD
 	reloadedRecently bool
 }
 
@@ -47,6 +50,7 @@ const (
 )
 
 func (m *Model) Init() tea.Cmd {
+	m.imgOrExplanation = true
 	return nil
 }
 
@@ -68,6 +72,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reloadedRecently = true
 			m.State = StateLoading
 			cmds = append(cmds, m.loadAPOD())
+		case key.Matches(msg, keyExplanation):
+			m.imgOrExplanation = !m.imgOrExplanation
 		}
 	case apodMsg:
 		m.apod = msg
@@ -82,7 +88,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 type msgRerender struct{}
 
-type apodMsg *nasa.Image
+type apodMsg *apod.APOD
 
 func (m *Model) loadAPOD() tea.Cmd {
 	return func() tea.Msg {
@@ -106,6 +112,10 @@ var (
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
 	)
+	keyExplanation = key.NewBinding(
+		key.WithKeys("e", "ctrl+e"),
+		key.WithHelp("e", "explanation/image"),
+	)
 )
 
 func (m *Model) View() string {
@@ -121,6 +131,12 @@ func (m *Model) View() string {
 func (m *Model) viewAPOD() string {
 	totalWidth := m.Width - 2 // -2 for the margin
 	apodWidth := min(60, totalWidth)
+	freeWidth := totalWidth - apodWidth
+	if m.imgOrExplanation {
+		// full-width apod if we are showing the image
+		apodWidth = totalWidth
+		freeWidth = totalWidth
+	}
 	apodView := (&apodView{
 		apod:             m.apod,
 		style:            m.Style,
@@ -129,41 +145,70 @@ func (m *Model) viewAPOD() string {
 		txtMuted:         m.txtMuted,
 		txtYellow:        m.txtYellow,
 		divDot:           m.divDot,
+		writeExplanation: !m.imgOrExplanation,
 	}).View()
 	helpView := m.viewHelp()
 
-	freeWidth := totalWidth - apodWidth
-	freeHeight := m.Height - 2 - countLines(helpView) + 2 // -2 for the margin, +2 for the help view
+	freeHeight := m.Height - 3 - countLines(helpView) // -3 for the margins
+	if m.imgOrExplanation {
+		freeHeight -= countLines(apodView)
+		image, err := m.apod.ImageDecoded()
+		if err != nil {
+			slog.Error("failed to get image decoded", "error", err)
+		}
+		converter := convert.NewImageConverter()
 
-	// find ascii art fitting the free width and height
-	var asciiArt string
-	allAsciiArt := slices.Clone(ASCIIAll)
-	lom.Shuffle(allAsciiArt)
-	for _, art := range allAsciiArt {
-		if countLines(art) > freeHeight {
-			continue
+		// resize the smaller dimension to fit the free width or height
+		// the other dimension being set to 0 will maintain the aspect ratio
+		var imageWidth, imageHeight int
+		if image.Bounds().Dx() > image.Bounds().Dy() {
+			imageWidth = freeWidth
+		} else {
+			imageHeight = freeHeight
 		}
-		longestLine := lenLongest(strings.Split(art, "\n")...)
-		if longestLine > freeWidth {
-			continue
+		asciiImage := converter.Image2ASCIIString(image, &convert.Options{
+			Colored:     true,
+			FixedWidth:  imageWidth,
+			FixedHeight: imageHeight,
+		})
+		return m.Style.Margin(1, 1).Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				apodView,
+				m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiImage),
+				helpView,
+			),
+		)
+	} else {
+		// find ascii art fitting the free width and height
+		var asciiArt string
+		allAsciiArt := slices.Clone(ASCIIAll)
+		lom.Shuffle(allAsciiArt)
+		for _, art := range allAsciiArt {
+			if countLines(art) > freeHeight {
+				continue
+			}
+			longestLine := lenLongest(strings.Split(art, "\n")...)
+			if longestLine > freeWidth {
+				continue
+			}
+			asciiArt = colorize(m.Style, art, colorMuted, colorCosmic, colorStellar, colorNebula)
+			break
 		}
-		asciiArt = colorize(m.Style, art, colorMuted, colorCosmic, colorStellar, colorNebula)
-		break
+
+		return m.Style.Margin(1, 1).Render(
+			lipgloss.JoinHorizontal(lipgloss.Top,
+				apodView+helpView,
+				m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
+			),
+		)
 	}
-
-	return m.Style.Margin(1, 1).Render(
-		lipgloss.JoinHorizontal(lipgloss.Top,
-			apodView+helpView,
-			m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
-		),
-	)
 }
 
 func (m *Model) viewHelp() string {
 	hlp := help.New()
 	hlp.Styles.ShortKey = hlp.Styles.ShortKey.Bold(true)
-	hlpView := hlp.ShortHelpView([]key.Binding{keyQuit, keyReload})
-	return m.Style.MarginTop(3).Render(hlpView)
+	hlpView := hlp.ShortHelpView([]key.Binding{keyExplanation, keyReload, keyQuit})
+	return m.Style.MarginTop(1).Render(hlpView)
 }
 
 func (m *Model) viewLoading() string {
@@ -204,45 +249,46 @@ func countLines(str string) int {
 }
 
 type apodView struct {
-	apod             *nasa.Image
+	apod             *apod.APOD
 	style            lipgloss.Style
 	reloadedRecently bool
 	width            int
+	writeExplanation bool
 	txtMuted         func() lipgloss.Style
 	txtYellow        func() lipgloss.Style
 	divDot           func() lipgloss.Style
 }
 
 func (v *apodView) View() string {
-	return v.header()
-}
-
-func (v *apodView) header() string {
 	txt := v.style
 	var s strings.Builder
 
 	// header
 	s.WriteString(v.txtMuted().Render("🌌 Astronomy Picture of the Day"))
 	s.WriteString("\n")
+
+	// apod
+	if v.apod == nil {
+		s.WriteString(txt.Render("error fetching APOD :("))
+		s.WriteString("\n")
+		return s.String()
+	}
 	s.WriteString(v.txtMuted().Render(v.apod.ApodDate.Format(time.DateOnly)))
 	if v.reloadedRecently {
 		s.WriteString(v.divDot().Render() + v.txtYellow().Render("reloaded!"))
 	}
 	s.WriteString("\n")
 
-	// apod
-	if v.apod == nil {
-		s.WriteString(txt.Render("error fetching APOD :("))
-	} else {
-		s.WriteString("\n")
-		s.WriteString("\n")
-		s.WriteString(txt.Width(v.width).Align(lipgloss.Center).Bold(true).Render(v.apod.Title))
-		s.WriteString("\n")
-		s.WriteString("\n")
+	s.WriteString("\n")
+	s.WriteString("\n")
+	s.WriteString(txt.Width(v.width).Align(lipgloss.Center).Bold(true).Render(v.apod.Title))
+	s.WriteString("\n")
+	s.WriteString("\n")
+
+	if v.writeExplanation {
 		s.WriteString(txt.Render(wordwrap.String(v.apod.Explanation, v.width)))
 	}
 
-	s.WriteString("\n")
 	return s.String()
 }
 
