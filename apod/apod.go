@@ -35,7 +35,6 @@ type apod struct {
 
 func (n *apod) getAPOD(_ context.Context) (*APOD, error) {
 	if n.lastAPODDay == today() {
-		time.Sleep(time.Second * 2)
 		return n.lastAPOD, nil
 	}
 
