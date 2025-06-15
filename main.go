@@ -1,6 +1,7 @@
 package airlockspace
 
 import (
+	"fmt"
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
@@ -47,6 +48,7 @@ type State int
 const (
 	StateLoading State = iota
 	StateAPOD
+	StateLink
 )
 
 func (m *Model) Init() tea.Cmd {
@@ -73,7 +75,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.State = StateLoading
 			cmds = append(cmds, m.loadAPOD())
 		case key.Matches(msg, keyExplanation):
+			m.State = StateAPOD
 			m.imgOrExplanation = !m.imgOrExplanation
+		case key.Matches(msg, keyLink):
+			if m.State == StateLink {
+				m.State = StateAPOD
+			} else {
+				m.State = StateLink
+			}
 		}
 	case apodMsg:
 		m.apod = msg
@@ -104,6 +113,10 @@ func (m *Model) loadAPOD() tea.Cmd {
 }
 
 var (
+	keyLink = key.NewBinding(
+		key.WithKeys("l", "ctrl+l"),
+		key.WithHelp("l", "link"),
+	)
 	keyReload = key.NewBinding(
 		key.WithKeys("r", "ctrl+r"),
 		key.WithHelp("r", "reload"),
@@ -124,6 +137,8 @@ func (m *Model) View() string {
 		return m.viewLoading()
 	case StateAPOD:
 		return m.viewAPOD()
+	case StateLink:
+		return m.viewLink()
 	}
 	return "error"
 }
@@ -204,15 +219,22 @@ func (m *Model) viewAPOD() string {
 	}
 }
 
+func (m *Model) viewLink() string {
+	helpView := m.viewHelp()
+	return m.txtYellow().Width(m.Width).Height(m.Height).Align(lipgloss.Center, lipgloss.Center).Render(
+		"🔗 link to APOD:\n\n" + fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", m.apod.ApodDate.Format("060102")) + "\n" + helpView,
+	)
+}
+
 func (m *Model) viewHelp() string {
 	hlp := help.New()
 	hlp.Styles.ShortKey = hlp.Styles.ShortKey.Bold(true)
-	hlpView := hlp.ShortHelpView([]key.Binding{keyExplanation, keyReload, keyQuit})
+	hlpView := hlp.ShortHelpView([]key.Binding{keyExplanation, keyLink, keyReload, keyQuit})
 	return m.Style.MarginTop(1).Render(hlpView)
 }
 
 func (m *Model) viewLoading() string {
-	return m.txtYellow().Margin(3, 6).Render("loading...")
+	return m.txtYellow().Width(m.Width).Height(m.Height).Align(lipgloss.Center, lipgloss.Center).Render("✨ loading...")
 }
 
 func (m *Model) txtMuted() lipgloss.Style {
