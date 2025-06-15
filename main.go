@@ -50,6 +50,7 @@ const (
 	StateLoading State = iota
 	StateAPOD
 	StateLink
+	StateFullscreen
 )
 
 func (m *Model) Init() tea.Cmd {
@@ -83,6 +84,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.State = StateAPOD
 			} else {
 				m.State = StateLink
+			}
+		case key.Matches(msg, keyFullscreen):
+			if m.State == StateFullscreen {
+				m.State = StateAPOD
+			} else {
+				m.State = StateFullscreen
 			}
 		}
 	case apodMsg:
@@ -130,6 +137,10 @@ var (
 		key.WithKeys("e", "ctrl+e"),
 		key.WithHelp("e", "explanation/image"),
 	)
+	keyFullscreen = key.NewBinding(
+		key.WithKeys("f", "ctrl+f"),
+		key.WithHelp("f", "fullscreen"),
+	)
 )
 
 func (m *Model) View() string {
@@ -140,6 +151,8 @@ func (m *Model) View() string {
 		return m.viewAPOD()
 	case StateLink:
 		return m.viewLink()
+	case StateFullscreen:
+		return m.viewFullscreen()
 	}
 	return "error"
 }
@@ -220,10 +233,13 @@ func (m *Model) viewLink() string {
 	)
 }
 
-func (m *Model) viewHelp() string {
+func (m *Model) viewHelp(keys ...key.Binding) string {
+	if len(keys) == 0 {
+		keys = []key.Binding{keyExplanation, keyLink, keyReload, keyFullscreen, keyQuit}
+	}
 	hlp := help.New()
 	hlp.Styles.ShortKey = hlp.Styles.ShortKey.Bold(true)
-	hlpView := hlp.ShortHelpView([]key.Binding{keyExplanation, keyLink, keyReload, keyQuit})
+	hlpView := hlp.ShortHelpView(keys)
 	return m.Style.MarginTop(1).Render(hlpView)
 }
 
@@ -341,4 +357,37 @@ func fitImage(imageWidth, imageHeight, containerWidth, containerHeight int) (int
 	newHeight := int(math.Round(float64(imageHeight) * scale))
 
 	return newWidth, newHeight
+}
+
+func (m *Model) viewFullscreen() string {
+	totalWidth := m.Width
+	totalHeight := m.Height
+
+	image, err := m.apod.ImageDecoded()
+	if err != nil {
+		slog.Error("failed to get image decoded", "error", err)
+	}
+	converter := convert.NewImageConverter()
+
+	helpView := strings.TrimSpace(m.viewHelp(keyFullscreen))
+
+	imageWidth, imageHeight := fitImage(image.Bounds().Dx(), image.Bounds().Dy(), totalWidth, totalHeight)
+	asciiImage := converter.Image2ASCIIString(image, &convert.Options{
+		Colored:     true,
+		FixedWidth:  imageWidth,
+		FixedHeight: imageHeight,
+	})
+
+	view := lipgloss.Place(
+		totalWidth, totalHeight, lipgloss.Center, lipgloss.Center,
+		asciiImage,
+	)
+
+	viewLines := strings.Split(view, "\n")
+	lastLine := viewLines[len(viewLines)-1]
+	if len(lastLine) > len(helpView) {
+		lastLine = helpView + lastLine[len(helpView):]
+	}
+	viewLines[len(viewLines)-1] = lastLine
+	return strings.Join(viewLines, "\n")
 }
