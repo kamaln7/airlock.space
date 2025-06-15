@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
 	airlockspace "github.com/kamaln7/airlock.space"
+	"github.com/muesli/termenv"
 )
 
 var (
@@ -92,6 +94,20 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	// The recommended way to use these styles is to then pass them down to
 	// your Bubble Tea model.
 	renderer := bubbletea.MakeRenderer(s)
+	var colorTerm string
+	var isIterm2 bool
+	for _, env := range s.Environ() {
+		if strings.HasPrefix(env, "COLORTERM=") {
+			colorTerm = strings.TrimPrefix(env, "COLORTERM=")
+			continue
+		}
+
+		if strings.EqualFold(env, "TERM_PROGRAM=iTerm2") || strings.EqualFold(env, "LC_TERMINAL=iTerm2") {
+			isIterm2 = true
+			continue
+		}
+	}
+	renderer.SetColorProfile(getSSHTermInfo(pty.Term, colorTerm, isIterm2))
 
 	m := &airlockspace.Model{
 		Width:  pty.Window.Width,
@@ -107,4 +123,45 @@ func GetEnv(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getSSHTermInfo(term, colorTerm string, isIterm2 bool) termenv.Profile {
+	term = strings.ToLower(term)
+	colorTerm = strings.ToLower(colorTerm)
+
+	if isIterm2 {
+		return termenv.TrueColor
+	}
+
+	switch colorTerm {
+	case "24bit", "truecolor":
+		return termenv.TrueColor
+	case "yes", "true":
+		return termenv.ANSI256
+	}
+
+	switch term {
+	case
+		"alacritty",
+		"contour",
+		"rio",
+		"wezterm",
+		"xterm-ghostty",
+		"xterm-kitty":
+		return termenv.TrueColor
+	case "linux", "xterm":
+		return termenv.ANSI
+	}
+
+	if strings.Contains(term, "256color") {
+		return termenv.ANSI256
+	}
+	if strings.Contains(term, "color") {
+		return termenv.ANSI
+	}
+	if strings.Contains(term, "ansi") {
+		return termenv.ANSI
+	}
+
+	return termenv.Ascii
 }
