@@ -185,14 +185,20 @@ func (m *Model) viewAPOD() string {
 		if err != nil {
 			slog.Error("failed to get image decoded", "error", err)
 		}
-		converter := convert.NewImageConverter()
+		var asciiImage string
+		if image == nil {
+			asciiImage = "could not load image"
+		} else {
+			converter := convert.NewImageConverter()
 
-		imageWidth, imageHeight := fitImage(image.Bounds().Dx(), image.Bounds().Dy(), freeWidth, freeHeight)
-		asciiImage := converter.Image2ASCIIString(image, &convert.Options{
-			Colored:     true,
-			FixedWidth:  imageWidth,
-			FixedHeight: imageHeight,
-		})
+			imageWidth, imageHeight := fitImage(image.Bounds().Dx(), image.Bounds().Dy(), freeWidth, freeHeight)
+			asciiImage = converter.Image2ASCIIString(image, &convert.Options{
+				Colored:     true,
+				FixedWidth:  imageWidth,
+				FixedHeight: imageHeight,
+			})
+		}
+
 		return m.Style.Margin(1, 1).Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				apodView,
