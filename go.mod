@@ -10,7 +10,9 @@ require (
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
 	github.com/charmbracelet/wish v1.4.7
 	github.com/kamaln7/resolvable v0.0.0-20250612203940-5b849c87b049
+	github.com/muesli/reflow v0.3.0
 	github.com/peteretelej/nasa v0.0.0-20181219221121-7a9680211873
+	github.com/samber/lo v1.51.0
 )
 
 require (
