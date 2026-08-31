@@ -365,7 +365,8 @@ func (m *Model) helpKeys() []key.Binding {
 		if m.preferArt {
 			pDesc = "image"
 		}
-		keys = slices.Insert(keys, 4, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
+		// q quit stays last
+		keys = slices.Insert(keys, len(keys)-1, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
 	}
 	return keys
 }
