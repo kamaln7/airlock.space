@@ -173,12 +173,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selPending = true
 			m.selAnchor = point{msg.X, msg.Y}
 			m.selEnd = m.selAnchor
-		case msg.Action == tea.MouseActionRelease && m.selActive:
-			// cmd+c/ctrl+shift+c never reach the app (macOS eats cmd+c; legacy
-			// input encodes ctrl+shift+c as plain ctrl+c, which must quit), so
-			// the selection copies implicitly, like a terminal
-			if text := m.selectionText(); text != "" {
-				io.WriteString(m.Session, osc52Copy(text))
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
+			// right-click copies the selection (cmd+c/ctrl+shift+c never reach
+			// the app, and ctrl+c must stay quit)
+			if m.selActive {
+				if text := m.selectionText(); text != "" {
+					io.WriteString(m.Session, osc52Copy(text))
+				}
+				m.selActive = false
 			}
 		}
 	case apodMsg:
