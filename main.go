@@ -27,6 +27,13 @@ var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
 // NASA appends this migration notice to every explanation these days
 var apodMovingNotice = regexp.MustCompile(`\s*APOD.s main NASA (web\s?)?site is moving:.*`)
 
+// explanationText is the displayed explanation: notice stripped, NASA's
+// space-run separators turned into real paragraph breaks.
+func (m *Model) explanationText() string {
+	expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
+	return paragraphBreaks.ReplaceAllString(expl, "\n\n")
+}
+
 var (
 	colorMuted      = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
 	colorSuperMuted = lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"}
@@ -107,14 +114,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
-			// ctrl+c (which is also what ctrl+shift+c arrives as) copies an
-			// active selection instead of quitting; q always quits
-			if m.selActive && msg.String() == "ctrl+c" {
-				if text := m.selectionText(); text != "" {
-					io.WriteString(m.Session, osc52Copy(text))
-				}
-				break
-			}
 			return m, tea.Quit
 		case key.Matches(msg, keyExplanation):
 			m.State = StateAPOD
@@ -151,10 +150,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		switch {
 		case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft:
-			// drag: extend the text selection (copy happens on ctrl+c)
+			// drag: extend the text selection
 			m.mouseX, m.mouseY = msg.X, msg.Y
 			if m.selPending {
-				m.selEnd = m.clampSelPoint(point{msg.X, msg.Y})
+				m.selEnd = point{msg.X, msg.Y}
 				m.selActive = m.selEnd != m.selAnchor
 			}
 		case msg.Action == tea.MouseActionMotion:
@@ -170,10 +169,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.linkHitTest(msg.X, msg.Y) {
 				cmds = append(cmds, m.copyLink())
 			}
-			if m.inSelRegion(point{msg.X, msg.Y}) {
-				m.selPending = true
-				m.selAnchor = m.clampSelPoint(point{msg.X, msg.Y})
-				m.selEnd = m.selAnchor
+			// selection can start anywhere; it only ever applies to copyable text
+			m.selPending = true
+			m.selAnchor = point{msg.X, msg.Y}
+			m.selEnd = m.selAnchor
+		case msg.Action == tea.MouseActionRelease && m.selActive:
+			// cmd+c/ctrl+shift+c never reach the app (macOS eats cmd+c; legacy
+			// input encodes ctrl+shift+c as plain ctrl+c, which must quit), so
+			// the selection copies implicitly, like a terminal
+			if text := m.selectionText(); text != "" {
+				io.WriteString(m.Session, osc52Copy(text))
 			}
 		}
 	case apodMsg:
@@ -293,23 +298,27 @@ func (m *Model) View() string {
 		// leaves artifacts behind once the real one renders
 		return ""
 	}
-	var view string
-	switch m.State {
-	case StateLoading:
-		view = m.viewLoading()
-	case StateAPOD:
-		view = m.viewAPOD()
-	case StateLink:
-		view = m.viewLink()
-	case StateFullscreen:
-		view = m.viewFullscreen()
-	default:
-		view = "error"
-	}
+	view := m.baseView()
 	if m.selActive {
 		view = m.applySelection(view)
 	}
 	return view
+}
+
+// baseView renders the current page without the selection overlay; selection
+// helpers must use this (via frameLine) to avoid recursing through View.
+func (m *Model) baseView() string {
+	switch m.State {
+	case StateLoading:
+		return m.viewLoading()
+	case StateAPOD:
+		return m.viewAPOD()
+	case StateLink:
+		return m.viewLink()
+	case StateFullscreen:
+		return m.viewFullscreen()
+	}
+	return "error"
 }
 
 func (m *Model) viewAPOD() string {
@@ -435,51 +444,6 @@ func (m *Model) viewHelp() string {
 
 type point struct{ X, Y int }
 
-// selRegion is the selectable area: the text column (header, title,
-// explanation) of the explanation view. Returns its column bounds.
-func (m *Model) selRegion() (colStart, colEnd int, ok bool) {
-	if m.State != StateAPOD || m.imgOrExplanation {
-		return 0, 0, false
-	}
-	return 1, 1 + min(72, m.Width-2), true // 1 for the left margin
-}
-
-// helpRowIndex locates the help bar's screen row, or -1.
-func (m *Model) helpRowIndex() int {
-	lines := strings.Split(m.View(), "\n")
-	for i, l := range lines {
-		if m.isHelpLine(ansi.Strip(l)) {
-			return i
-		}
-	}
-	return -1
-}
-
-func (m *Model) inSelRegion(p point) bool {
-	colStart, colEnd, ok := m.selRegion()
-	if !ok || p.X < colStart || p.X >= colEnd {
-		return false
-	}
-	if hr := m.helpRowIndex(); hr >= 0 && p.Y >= hr {
-		return false
-	}
-	return true
-}
-
-func (m *Model) clampSelPoint(p point) point {
-	colStart, colEnd, ok := m.selRegion()
-	if !ok {
-		return p
-	}
-	p.X = min(max(p.X, colStart), colEnd-1)
-	p.Y = max(p.Y, 0)
-	if hr := m.helpRowIndex(); hr >= 0 && p.Y >= hr {
-		p.Y = hr - 1
-		p.X = colEnd - 1
-	}
-	return p
-}
-
 // selBounds returns the selection corners in top-to-bottom order.
 func (m *Model) selBounds() (a, b point) {
 	a, b = m.selAnchor, m.selEnd
@@ -489,22 +453,60 @@ func (m *Model) selBounds() (a, b point) {
 	return a, b
 }
 
-// selSpan gives the selected column range on row y, clamped to the text column.
-func (m *Model) selSpan(y, lineWidth int) (x1, x2 int, ok bool) {
-	colStart, colEnd, regionOK := m.selRegion()
-	if !regionOK {
+// copyableSpan returns the column span of copyable text on screen row y:
+// the APOD title (any view) or a line of the explanation. Everything else —
+// headers, dates, gaps, art, footer — is not selectable.
+func (m *Model) copyableSpan(y int) (x1, x2 int, ok bool) {
+	if m.apod == nil {
 		return 0, 0, false
 	}
+	line := m.frameLine(y)
+
+	// the full title on one row (main screen header row, or its own row)
+	if s, e, found := columnSpan(line, m.apod.Title); found {
+		return s, e, true
+	}
+
+	// explanation view: text-column content matched against the actual
+	// title/explanation text, so gaps and decorations never highlight
+	if m.State == StateAPOD && !m.imgOrExplanation {
+		colStart := 1
+		colEnd := min(1+min(72, m.Width-2), ansi.StringWidth(line))
+		if colStart >= colEnd {
+			return 0, 0, false
+		}
+		seg := ansi.Cut(line, colStart, colEnd)
+		trimmedLeft := strings.TrimLeft(seg, " ")
+		trimmed := strings.TrimRight(trimmedLeft, " ")
+		if trimmed == "" {
+			return 0, 0, false
+		}
+		if !strings.Contains(m.explanationText(), trimmed) && !strings.Contains(m.apod.Title, trimmed) {
+			return 0, 0, false
+		}
+		x1 = colStart + ansi.StringWidth(seg) - ansi.StringWidth(trimmedLeft)
+		return x1, x1 + ansi.StringWidth(trimmed), true
+	}
+	return 0, 0, false
+}
+
+// selSpan gives the highlighted column range on row y: the raw linewise drag
+// span intersected with the row's copyable text.
+func (m *Model) selSpan(y, lineWidth int) (x1, x2 int, ok bool) {
 	a, b := m.selBounds()
 	if y < a.Y || y > b.Y {
 		return 0, 0, false
 	}
-	x1, x2 = colStart, min(colEnd, lineWidth)
+	c1, c2, copyable := m.copyableSpan(y)
+	if !copyable {
+		return 0, 0, false
+	}
+	x1, x2 = c1, c2
 	if y == a.Y {
-		x1 = a.X
+		x1 = max(x1, a.X)
 	}
 	if y == b.Y {
-		x2 = min(b.X+1, x2)
+		x2 = min(x2, b.X+1)
 	}
 	return x1, x2, x1 < x2
 }
@@ -528,7 +530,7 @@ func (m *Model) applySelection(frame string) string {
 
 // selectionText extracts the selected text, trimmed like terminals do.
 func (m *Model) selectionText() string {
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.baseView(), "\n")
 	a, b := m.selBounds()
 	var out []string
 	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
@@ -557,7 +559,7 @@ func columnSpan(line, substr string) (start, end int, ok bool) {
 
 // frameLine returns the ANSI-stripped screen row under y.
 func (m *Model) frameLine(y int) string {
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.baseView(), "\n")
 	if y < 0 || y >= len(lines) {
 		return ""
 	}
@@ -763,11 +765,7 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 
 	if writeExplanation {
-		// NASA separates appended notices with runs of spaces; give them
-		// real paragraph breaks
-		expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
-		expl = paragraphBreaks.ReplaceAllString(expl, "\n\n")
-		s.WriteString(txt.Render(wordwrap.String(expl, width)))
+		s.WriteString(txt.Render(wordwrap.String(m.explanationText(), width)))
 		s.WriteString("\n")
 	}
 
