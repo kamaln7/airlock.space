@@ -55,7 +55,6 @@ type Model struct {
 	placedRows       int
 	imageLoading     bool
 	spinFrame        int
-	reloadedRecently bool
 }
 
 type State int
@@ -99,10 +98,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, keyQuit):
 			return m, tea.Quit
-		case key.Matches(msg, keyReload):
-			m.reloadedRecently = true
-			m.State = StateLoading
-			cmds = append(cmds, m.loadAPOD())
 		case key.Matches(msg, keyExplanation):
 			m.State = StateAPOD
 			m.imgOrExplanation = !m.imgOrExplanation
@@ -160,9 +155,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.imageLoading = true
 			cmds = append(cmds, m.loadImage())
 		}
-		cmds = append(cmds, tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
-			return msgRerender{}
-		}))
 	case imageMsg:
 		m.imageOK = msg.ok
 		m.kittySent = msg.kittySent
@@ -173,8 +165,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// skips the flush, so the perpetual tick is free
 		m.spinFrame++
 		cmds = append(cmds, spinTick())
-	case msgRerender:
-		m.reloadedRecently = false
 	case msgCopyExpired:
 		m.copiedRecently = false
 	}
@@ -188,8 +178,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, tea.Batch(cmds...)
 }
-
-type msgRerender struct{}
 
 type apodMsg *apod.APOD
 
@@ -235,10 +223,6 @@ var (
 	keyLink = key.NewBinding(
 		key.WithKeys("l", "ctrl+l"),
 		key.WithHelp("l", "link"),
-	)
-	keyReload = key.NewBinding(
-		key.WithKeys("r", "ctrl+r"),
-		key.WithHelp("r", "reload"),
 	)
 	keyQuit = key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
@@ -374,7 +358,7 @@ func (m *Model) helpKeys() []key.Binding {
 		eDesc = "explanation"
 	}
 	keyExpl := key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc))
-	keys := []key.Binding{keyExpl, keyLink, keyReload, keyFullscreen, keyQuit}
+	keys := []key.Binding{keyExpl, keyLink, keyFullscreen, keyQuit}
 	// image/ascii toggle only where the image is on screen; action-only label
 	if m.kittySent && m.imgOrExplanation {
 		pDesc := "ascii"
@@ -601,9 +585,6 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 
 	dateLine := m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly))
-	if m.reloadedRecently {
-		dateLine += m.divDot().Render() + m.txtYellow().Render("reloaded!")
-	}
 	title := txt.Bold(true).Render(termenv.Hyperlink(m.apod.Link(), m.apod.Title))
 
 	// center the title relative to the viewport, not the space next to the
