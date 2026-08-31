@@ -375,9 +375,13 @@ func (m *Model) helpKeys() []key.Binding {
 	}
 	keyExpl := key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc))
 	keys := []key.Binding{keyExpl, keyLink, keyReload, keyFullscreen, keyQuit}
-	// photo/art toggle only where the image is on screen
+	// image/ascii toggle only where the image is on screen; action-only label
 	if m.kittySent && m.imgOrExplanation {
-		keys = slices.Insert(keys, 4, keyPhoto)
+		pDesc := "ascii"
+		if m.preferArt {
+			pDesc = "image"
+		}
+		keys = slices.Insert(keys, 4, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
 	}
 	return keys
 }
