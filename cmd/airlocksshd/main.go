@@ -1,8 +1,5 @@
 package main
 
-// An example Bubble Tea server. This will put an ssh session into alt screen
-// and continually print up to date terminal information.
-
 import (
 	"context"
 	"errors"
@@ -15,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -30,12 +28,28 @@ var (
 	port = GetEnv("SSH_PORT", "23234")
 )
 
+// profileKey stores the detected termenv.Profile in the session context.
+var profileKey struct{ _ byte }
+
 func main() {
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(GetEnv("SSH_HOST_KEY", ".airlocksshd/id_ed25519")),
+		// ponytail: flat 1h idle cutoff; per-session activity tracking if long-lived dashboards matter
+		wish.WithIdleTimeout(time.Hour),
 		wish.WithMiddleware(
 			bubbletea.Middleware(teaHandler),
+			// runs after the tea program exits, outside the alt screen
+			func(next ssh.Handler) ssh.Handler {
+				return func(s ssh.Session) {
+					next(s)
+					re := lipgloss.NewRenderer(s)
+					if p, ok := s.Context().Value(profileKey).(termenv.Profile); ok {
+						re.SetColorProfile(p)
+					}
+					wish.WriteString(s, airlockspace.Goodbye(re))
+				}
+			},
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY.
 			logging.Middleware(),
 		),
@@ -94,27 +108,47 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	// The recommended way to use these styles is to then pass them down to
 	// your Bubble Tea model.
 	renderer := bubbletea.MakeRenderer(s)
-	var colorTerm string
-	var isIterm2 bool
+	var colorTerm, termProgram string
 	for _, env := range s.Environ() {
-		if strings.HasPrefix(env, "COLORTERM=") {
-			colorTerm = strings.TrimPrefix(env, "COLORTERM=")
-			continue
+		if v, ok := strings.CutPrefix(env, "COLORTERM="); ok {
+			colorTerm = v
 		}
-
-		if strings.EqualFold(env, "TERM_PROGRAM=iTerm2") || strings.EqualFold(env, "LC_TERMINAL=iTerm2") {
-			isIterm2 = true
-			continue
+		if v, ok := strings.CutPrefix(env, "TERM_PROGRAM="); ok {
+			termProgram = v
+		}
+		if v, ok := strings.CutPrefix(env, "LC_TERMINAL="); ok && termProgram == "" {
+			termProgram = v
 		}
 	}
-	renderer.SetColorProfile(getSSHTermInfo(pty.Term, colorTerm, isIterm2))
+	profile := getSSHTermInfo(pty.Term, colorTerm, termProgram)
+	renderer.SetColorProfile(profile)
+	s.Context().SetValue(profileKey, profile)
 
 	m := &airlockspace.Model{
-		Width:  pty.Window.Width,
-		Height: pty.Window.Height,
-		Style:  renderer.NewStyle(),
+		Width:         pty.Window.Width,
+		Height:        pty.Window.Height,
+		Style:         renderer.NewStyle(),
+		Profile:       profile,
+		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram),
+		Session:       s,
 	}
-	return m, []tea.ProgramOption{tea.WithAltScreen()}
+	return m, []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseAllMotion()}
+}
+
+// supportsKittyGraphics reports whether the client terminal implements the
+// kitty graphics protocol with unicode placeholders. Env-based heuristic: we
+// can't query the terminal through wish, so only well-known implementations
+// are listed. (wezterm speaks the protocol but not placeholders.)
+func supportsKittyGraphics(term, termProgram string) bool {
+	switch strings.ToLower(term) {
+	case "xterm-kitty", "xterm-ghostty":
+		return true
+	}
+	switch strings.ToLower(termProgram) {
+	case "kitty", "ghostty":
+		return true
+	}
+	return false
 }
 
 func GetEnv(name, fallback string) string {
@@ -125,11 +159,12 @@ func GetEnv(name, fallback string) string {
 	return value
 }
 
-func getSSHTermInfo(term, colorTerm string, isIterm2 bool) termenv.Profile {
+func getSSHTermInfo(term, colorTerm, termProgram string) termenv.Profile {
 	term = strings.ToLower(term)
 	colorTerm = strings.ToLower(colorTerm)
 
-	if isIterm2 {
+	switch strings.ToLower(termProgram) {
+	case "iterm2", "iterm.app", "kitty", "ghostty", "wezterm":
 		return termenv.TrueColor
 	}
 
@@ -144,6 +179,7 @@ func getSSHTermInfo(term, colorTerm string, isIterm2 bool) termenv.Profile {
 	case
 		"alacritty",
 		"contour",
+		"foot",
 		"rio",
 		"wezterm",
 		"xterm-ghostty",

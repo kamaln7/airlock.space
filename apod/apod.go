@@ -3,99 +3,194 @@ package apod
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"regexp"
+	"strings"
 	"time"
 
-	"github.com/kamaln7/resolvable"
+	"github.com/kamaln7/resolvable/v2"
 	"github.com/peteretelej/nasa"
 )
 
 var Today = resolvable.New(
 	(&apod{}).getAPOD,
-	resolvable.WithRetry(),
-	resolvable.WithGraceful(),
-	resolvable.WithCacheTTL(time.Minute),
+	resolvable.Retry(3, nil),
+	resolvable.StaleOnError(),
+	resolvable.CacheFor(time.Minute),
 ).WithBackgroundContext()
 
 type APOD struct {
 	*nasa.Image
 
-	ImageBytes   resolvable.V[[]byte]
-	ImageDecoded resolvable.V[image.Image]
+	// ImageBytes is the compressed source image (jpeg/png). Decode on demand
+	// and discard: a decoded APOD is tens of MB, the box has 512.
+	ImageBytes resolvable.V[[]byte]
+	// PNGBytes is a PNG transcode for the kitty graphics protocol, only
+	// materialized when a kitty-capable client connects.
+	PNGBytes resolvable.V[[]byte]
+
+	// ImageSize is set once ImageBytes has resolved.
+	ImageSize image.Point
 }
 
 type apod struct {
-	lastAPOD    *APOD
-	lastAPODDay time.Time
+	last *APOD
 }
 
 func (n *apod) getAPOD(_ context.Context) (*APOD, error) {
-	if n.lastAPODDay == today() {
-		return n.lastAPOD, nil
+	// nasa.APODToday caches by day itself; we only wrap the result
+	var img *nasa.Image
+	var err error
+	if d := os.Getenv("APOD_DATE"); d != "" { // e.g. APOD_DATE=2026-08-29, for testing
+		if n.last != nil && n.last.Date == d {
+			// nasa.ApodImage has no cache (unlike APODToday); skip the refetch
+			return n.last, nil
+		}
+		var t time.Time
+		if t, err = time.Parse(time.DateOnly, d); err != nil {
+			return nil, fmt.Errorf("invalid APOD_DATE: %w", err)
+		}
+		img, err = nasa.ApodImage(t)
+	} else {
+		img, err = nasa.APODToday()
 	}
-
-	slog.Info("fetching APOD", "day", today())
-	apod, err := nasa.APODToday()
 	if err != nil {
-		return nil, err
+		return nil, redactAPIKey(err)
 	}
-	n.lastAPOD = newAPOD(apod)
-	n.lastAPODDay = today()
-	return n.lastAPOD, nil
+	if n.last == nil || n.last.Date != img.Date {
+		slog.Info("new APOD", "date", img.Date)
+		n.last = newAPOD(img)
+	}
+	return n.last, nil
 }
 
-func newAPOD(apod *nasa.Image) *APOD {
-	a := &APOD{
-		Image: apod,
-	}
+// api keys must never end up in logs
+var apiKeyRegexp = regexp.MustCompile(`api_key=[^&"'\s]+`)
+
+func redactAPIKey(err error) error {
+	return errors.New(apiKeyRegexp.ReplaceAllString(err.Error(), "api_key=REDACTED"))
+}
+
+func newAPOD(img *nasa.Image) *APOD {
+	a := &APOD{Image: img}
 	a.ImageBytes = resolvable.New(a.getImageBytes,
-		resolvable.WithRetry(),
-		resolvable.WithGraceful(),
+		resolvable.Retry(3, nil),
+		resolvable.CacheForever(),
 	).WithBackgroundContext()
-	a.ImageDecoded = resolvable.New(a.getImageDecoded,
-		resolvable.WithRetry(),
-		resolvable.WithGraceful(),
+	a.PNGBytes = resolvable.New(a.getPNGBytes,
+		resolvable.CacheForever(),
 	).WithBackgroundContext()
 	return a
 }
 
-func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
+var youtubeIDRegexp = regexp.MustCompile(`(?:youtube\.com/(?:watch\?v=|embed/)|youtu\.be/)([\w-]{11})`)
 
-	var url string
+// imageURLs returns candidate URLs to try in order. Video days on youtube get
+// their thumbnail; directly-hosted videos (mp4) have no image and will fail.
+func (a *APOD) imageURLs() []string {
+	if m := youtubeIDRegexp.FindStringSubmatch(a.URL + " " + a.HDURL); m != nil {
+		return []string{
+			fmt.Sprintf("https://img.youtube.com/vi/%s/maxresdefault.jpg", m[1]),
+			fmt.Sprintf("https://img.youtube.com/vi/%s/hqdefault.jpg", m[1]),
+		}
+	}
+	var urls []string
 	if a.URL != "" {
-		url = a.URL
-	} else if a.HDURL != "" {
-		url = a.HDURL
-	} else {
+		urls = append(urls, a.URL)
+	}
+	if a.HDURL != "" {
+		urls = append(urls, a.HDURL)
+	}
+	return urls
+}
+
+func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
+	urls := a.imageURLs()
+	if len(urls) == 0 {
 		return nil, fmt.Errorf("no image URL found")
 	}
+
+	var lastErr error
+	for _, url := range urls {
+		body, err := fetchImage(ctx, url)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
+		if err != nil {
+			lastErr = fmt.Errorf("decoding image config: %w", err)
+			continue
+		}
+		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
+		return body, nil
+	}
+	return nil, lastErr
+}
+
+func fetchImage(ctx context.Context, url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("downloading image: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("downloading image: status %d", resp.StatusCode)
+	}
+	// video days serve an mp4/youtube page; don't download megabytes just to fail decoding
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+		return nil, fmt.Errorf("not an image: content-type %q", ct)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading image body: %w", err)
 	}
-
 	return body, nil
 }
 
-func (a *APOD) getImageDecoded(ctx context.Context) (image.Image, error) {
+func (a *APOD) getPNGBytes(_ context.Context) ([]byte, error) {
+	byt, err := a.ImageBytes()
+	if err != nil {
+		return nil, err
+	}
+	if http.DetectContentType(byt) == "image/png" {
+		return byt, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(byt))
+	if err != nil {
+		return nil, fmt.Errorf("decoding image: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, fmt.Errorf("encoding png: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// Link is the APOD page for this image on nasa.gov.
+func (a *APOD) Link() string {
+	return fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", a.ApodDate.Format("060102"))
+}
+
+// Decode decodes the compressed image. The result is intentionally not cached;
+// hold it only as long as needed.
+func (a *APOD) Decode() (image.Image, error) {
 	byt, err := a.ImageBytes()
 	if err != nil {
 		return nil, err
@@ -105,8 +200,4 @@ func (a *APOD) getImageDecoded(ctx context.Context) (image.Image, error) {
 		return nil, fmt.Errorf("decoding image: %w", err)
 	}
 	return img, nil
-}
-
-func today() time.Time {
-	return time.Now().Truncate(time.Hour * 24)
 }
