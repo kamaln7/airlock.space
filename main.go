@@ -24,6 +24,9 @@ import (
 
 var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
 
+// NASA appends this migration notice to every explanation these days
+var apodMovingNotice = regexp.MustCompile(`\s*APOD.s main NASA (web\s?)?site is moving:.*`)
+
 var (
 	colorMuted      = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
 	colorSuperMuted = lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"}
@@ -52,6 +55,9 @@ type Model struct {
 	hoverLink        bool   // mouse is over the URL in the link view
 	mouseX           int    // last seen mouse position
 	mouseY           int
+	selAnchor        point // in-app text selection (mouse tracking eats the
+	selEnd           point // terminal's own selection, so we provide our own)
+	selActive        bool
 	artKey           string // memoized decorative art (stable across renders)
 	art              string
 	placedCols       int // current kitty virtual placement size
@@ -88,16 +94,9 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.loadAPOD(), spinTick())
 }
 
-// selectionMode reports whether mouse tracking should be off so the terminal's
-// native text selection works: the explanation view is the one people copy from.
-func (m *Model) selectionMode() bool {
-	return m.State == StateAPOD && !m.imgOrExplanation
-}
-
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	prevState := m.State
-	prevSelection := m.selectionMode()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -142,17 +141,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseMsg:
 		switch {
+		case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft:
+			// drag: extend the text selection
+			m.mouseX, m.mouseY = msg.X, msg.Y
+			m.selEnd = point{msg.X, msg.Y}
+			m.selActive = true
 		case msg.Action == tea.MouseActionMotion:
 			m.mouseX, m.mouseY = msg.X, msg.Y
 			m.hoverKey = m.helpHitTest(msg.X, msg.Y)
 			m.hoverLink = m.linkHitTest(msg.X, msg.Y)
 		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+			m.selActive = false
+			m.selAnchor = point{msg.X, msg.Y}
+			m.selEnd = m.selAnchor
 			if k := m.helpHitTest(msg.X, msg.Y); k != "" {
 				// dispatch the clicked help item as if its key was pressed
 				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
 			}
 			if m.linkHitTest(msg.X, msg.Y) {
 				cmds = append(cmds, m.copyLink())
+			}
+		case msg.Action == tea.MouseActionRelease && m.selActive:
+			// copy the selection to the client clipboard, like a terminal would
+			if text := m.selectionText(); text != "" {
+				io.WriteString(m.Session, osc52Copy(text))
 			}
 		}
 	case apodMsg:
@@ -185,15 +197,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, isKey := msg.(tea.KeyMsg); isKey || m.State != prevState {
 		m.hoverKey = m.helpHitTest(m.mouseX, m.mouseY)
 		m.hoverLink = m.linkHitTest(m.mouseX, m.mouseY)
-	}
-
-	if sel := m.selectionMode(); sel != prevSelection {
-		if sel {
-			m.hoverKey, m.hoverLink = "", false
-			cmds = append(cmds, tea.DisableMouse)
-		} else {
-			cmds = append(cmds, tea.EnableMouseAllMotion)
-		}
+		m.selActive = false // the frame changed under the selection
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -280,17 +284,23 @@ func (m *Model) View() string {
 		// leaves artifacts behind once the real one renders
 		return ""
 	}
+	var view string
 	switch m.State {
 	case StateLoading:
-		return m.viewLoading()
+		view = m.viewLoading()
 	case StateAPOD:
-		return m.viewAPOD()
+		view = m.viewAPOD()
 	case StateLink:
-		return m.viewLink()
+		view = m.viewLink()
 	case StateFullscreen:
-		return m.viewFullscreen()
+		view = m.viewFullscreen()
+	default:
+		view = "error"
 	}
-	return "error"
+	if m.selActive {
+		view = m.applySelection(view)
+	}
+	return view
 }
 
 func (m *Model) viewAPOD() string {
@@ -412,6 +422,65 @@ func (m *Model) viewHelp() string {
 		b.WriteString(keySt.Render(h.Key) + " " + descSt.Render(h.Desc))
 	}
 	return m.Style.MarginTop(1).Render(b.String())
+}
+
+type point struct{ X, Y int }
+
+// selBounds returns the selection corners in top-to-bottom order.
+func (m *Model) selBounds() (a, b point) {
+	a, b = m.selAnchor, m.selEnd
+	if a.Y > b.Y || (a.Y == b.Y && a.X > b.X) {
+		a, b = b, a
+	}
+	return a, b
+}
+
+// applySelection overlays reverse-video highlighting on the selected region.
+// Linewise, like terminal selection: full lines between the endpoints.
+func (m *Model) applySelection(frame string) string {
+	lines := strings.Split(frame, "\n")
+	a, b := m.selBounds()
+	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
+		line := lines[y]
+		width := ansi.StringWidth(line)
+		x1, x2 := 0, width
+		if y == a.Y {
+			x1 = min(a.X, width)
+		}
+		if y == b.Y {
+			x2 = min(b.X+1, width)
+		}
+		if x1 >= x2 {
+			continue
+		}
+		// the selected span loses its colors (stripped) — standard selection look
+		mid := m.Style.Reverse(true).Render(ansi.Strip(ansi.Cut(line, x1, x2)))
+		lines[y] = ansi.Cut(line, 0, x1) + mid + ansi.TruncateLeft(line, x2, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// selectionText extracts the selected text, trimmed like terminals do.
+func (m *Model) selectionText() string {
+	lines := strings.Split(m.View(), "\n")
+	a, b := m.selBounds()
+	var out []string
+	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
+		line := ansi.Strip(lines[y])
+		x1, x2 := 0, ansi.StringWidth(line)
+		if y == a.Y {
+			x1 = x1 + a.X
+		}
+		if y == b.Y {
+			x2 = min(b.X+1, x2)
+		}
+		if x1 >= x2 {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, strings.TrimRight(ansi.Cut(line, x1, x2), " "))
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // columnSpan finds substr in the (ANSI-stripped) line and returns its display
@@ -632,7 +701,8 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	if writeExplanation {
 		// NASA separates appended notices with runs of spaces; give them
 		// real paragraph breaks
-		expl := paragraphBreaks.ReplaceAllString(m.apod.Explanation, "\n\n")
+		expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
+		expl = paragraphBreaks.ReplaceAllString(expl, "\n\n")
 		s.WriteString(txt.Render(wordwrap.String(expl, width)))
 		s.WriteString("\n")
 	}
