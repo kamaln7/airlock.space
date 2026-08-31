@@ -11,7 +11,6 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -48,12 +47,14 @@ type Model struct {
 	copiedRecently   bool
 	hoverKey         string // help bar item under the mouse
 	hoverLink        bool   // mouse is over the URL in the link view
+	mouseX           int    // last seen mouse position
+	mouseY           int
 	artKey           string // memoized decorative art (stable across renders)
 	art              string
 	placedCols       int // current kitty virtual placement size
 	placedRows       int
 	imageLoading     bool
-	spinner          spinner.Model
+	spinFrame        int
 	reloadedRecently bool
 }
 
@@ -66,14 +67,28 @@ const (
 	StateFullscreen
 )
 
+// the moon-phase spinner is advanced by a single plain tick chain started in
+// Init; no start/stop bookkeeping means no way for the chain to die
+var spinnerFrames = []string{"🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"}
+
+type msgSpin struct{}
+
+func spinTick() tea.Cmd {
+	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
+}
+
+func (m *Model) spinnerView() string {
+	return m.txtYellow().Render(spinnerFrames[m.spinFrame%len(spinnerFrames)])
+}
+
 func (m *Model) Init() tea.Cmd {
 	m.imgOrExplanation = true
-	m.spinner = spinner.New(spinner.WithSpinner(spinner.Moon), spinner.WithStyle(m.txtYellow()))
-	return tea.Batch(m.loadAPOD(), m.spinner.Tick)
+	return tea.Batch(m.loadAPOD(), spinTick())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	prevState := m.State
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -87,7 +102,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyReload):
 			m.reloadedRecently = true
 			m.State = StateLoading
-			cmds = append(cmds, m.loadAPOD(), m.spinner.Tick)
+			cmds = append(cmds, m.loadAPOD())
 		case key.Matches(msg, keyExplanation):
 			m.State = StateAPOD
 			m.imgOrExplanation = !m.imgOrExplanation
@@ -123,6 +138,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		switch {
 		case msg.Action == tea.MouseActionMotion:
+			m.mouseX, m.mouseY = msg.X, msg.Y
 			m.hoverKey = m.helpHitTest(msg.X, msg.Y)
 			m.hoverLink = m.linkHitTest(msg.X, msg.Y)
 		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
@@ -142,7 +158,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.State = StateAPOD
 		if msg != nil {
 			m.imageLoading = true
-			cmds = append(cmds, m.loadImage(), m.spinner.Tick)
+			cmds = append(cmds, m.loadImage())
 		}
 		cmds = append(cmds, tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
 			return msgRerender{}
@@ -152,17 +168,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kittySent = msg.kittySent
 		m.imageLoading = false
 		m.applyArtDefault()
-	case spinner.TickMsg:
-		// always tick: a gated tick kills the chain permanently (spinner
-		// freeze); when the spinner isn't visible the frame is unchanged and
-		// bubbletea skips the flush, so this is free
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		cmds = append(cmds, cmd)
+	case msgSpin:
+		// when the spinner isn't visible the frame is unchanged and bubbletea
+		// skips the flush, so the perpetual tick is free
+		m.spinFrame++
+		cmds = append(cmds, spinTick())
 	case msgRerender:
 		m.reloadedRecently = false
 	case msgCopyExpired:
 		m.copiedRecently = false
+	}
+
+	if m.State != prevState {
+		// re-run hover hit-testing against the new page's layout
+		m.hoverKey = m.helpHitTest(m.mouseX, m.mouseY)
+		m.hoverLink = m.linkHitTest(m.mouseX, m.mouseY)
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -281,24 +301,30 @@ func (m *Model) viewAPOD() string {
 	apodView := m.viewAPODText(apodWidth, !showImage)
 	helpView := m.viewHelp()
 
-	freeHeight := m.Height - 3 - countLines(helpView) // -3 for the margins
+	freeHeight := m.Height - 2 - countLines(helpView) // -2 for top margin + last row
 	if showImage {
 		freeHeight -= countLines(apodView)
-		asciiImage := m.spinner.View() + " " + m.txtMuted().Render("loading...")
+		var imgBlock string
 		if m.imageOK {
-			asciiImage = m.imageArea(freeWidth, freeHeight)
+			imgBlock = m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(m.imageArea(freeWidth, freeHeight))
+		} else {
+			// pin the spinner to the exact screen center (same row as viewLoading)
+			pad := max(0, m.Height/2-1-countLines(apodView))
+			imgBlock = m.Style.Width(freeWidth).Height(freeHeight).Render(
+				strings.Repeat("\n", pad) + m.Style.Width(freeWidth).Align(lipgloss.Center).Render(m.loadingLine()),
+			)
 		}
-		return m.Style.Margin(1, 1).Render(
+		return m.Style.Margin(1, 1, 0, 1).Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				apodView,
-				m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiImage),
+				imgBlock,
 				helpView,
 			),
 		)
 	} else {
 		asciiArt := m.decorArt(freeWidth, freeHeight)
 
-		return m.Style.Margin(1, 1).Render(
+		return m.Style.Margin(1, 1, 0, 1).Render(
 			lipgloss.JoinHorizontal(lipgloss.Top,
 				apodView+helpView,
 				m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
@@ -313,7 +339,7 @@ func (m *Model) viewLink() string {
 	if m.hoverLink {
 		linkText = m.txtYellow().Underline(true).Render(link)
 	}
-	hint := m.txtSuperMuted().Render("click or press c to copy")
+	hint := "" // blank line keeps the layout stable when "copied!" appears
 	if m.copiedRecently {
 		hint = m.Style.Bold(true).Render("copied!")
 	}
@@ -338,14 +364,11 @@ func (m *Model) helpKeys() []key.Binding {
 	case StateLink:
 		return []key.Binding{keyLinkCopy, keyLinkBack, keyQuit}
 	case StateFullscreen:
-		keys := []key.Binding{keyFullscreen}
-		if m.kittySent {
-			keys = append(keys, keyPhoto)
-		}
-		return keys
+		return []key.Binding{keyFullscreen}
 	}
 	keys := []key.Binding{keyExplanation, keyLink, keyReload, keyFullscreen, keyQuit}
-	if m.kittySent {
+	// photo/art toggle only where the image is on screen
+	if m.kittySent && m.imgOrExplanation {
 		keys = slices.Insert(keys, 4, keyPhoto)
 	}
 	return keys
@@ -426,10 +449,18 @@ func (m *Model) linkHitTest(x, y int) bool {
 	return ok && x >= start && x < end
 }
 
+// loadingLine is the spinner + label, shared by both loading phases.
+func (m *Model) loadingLine() string {
+	return m.spinnerView() + " " + m.txtMuted().Render("loading...")
+}
+
 func (m *Model) viewLoading() string {
-	// no emoji here: their ambiguous width breaks bubbletea's line diffing,
-	// leaving stale "loading" fragments behind
-	return m.txtYellow().Width(m.Width).Height(m.Height).Align(lipgloss.Center, lipgloss.Center).Render(m.spinner.View() + " loading...")
+	// spinner pinned to the exact screen center so it doesn't jump when the
+	// view transitions to the image-loading phase
+	pad := max(0, m.Height/2)
+	return m.Style.Width(m.Width).Height(m.Height).Render(
+		strings.Repeat("\n", pad) + m.Style.Width(m.Width).Align(lipgloss.Center).Render(m.loadingLine()),
+	)
 }
 
 func (m *Model) txtMuted() lipgloss.Style {
@@ -541,31 +572,43 @@ func (m *Model) imageArea(cols, rows int) string {
 }
 
 // viewAPODText renders the header, date, title, and optionally the explanation.
+// When the width allows, the title shares the header row (flexbox-style);
+// otherwise it gets its own centered block below.
 func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	txt := m.Style
 	var s strings.Builder
 
-	// header
-	s.WriteString(m.txtMuted().Render("🌌 Astronomy Picture of the Day"))
-	s.WriteString("\n")
+	header := m.txtMuted().Render("🌌 Astronomy Picture of the Day")
 
-	// apod
 	if m.apod == nil {
+		s.WriteString(header)
+		s.WriteString("\n")
 		s.WriteString(txt.Render("error fetching APOD :("))
 		s.WriteString("\n")
 		return s.String()
 	}
-	s.WriteString(m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly)))
-	if m.reloadedRecently {
-		s.WriteString(m.divDot().Render() + m.txtYellow().Render("reloaded!"))
-	}
-	s.WriteString("\n")
 
-	s.WriteString("\n")
-	s.WriteString("\n")
-	s.WriteString(txt.Width(width).Align(lipgloss.Center).Bold(true).Render(termenv.Hyperlink(m.apod.Link(), m.apod.Title)))
-	s.WriteString("\n")
-	s.WriteString("\n")
+	dateLine := m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly))
+	if m.reloadedRecently {
+		dateLine += m.divDot().Render() + m.txtYellow().Render("reloaded!")
+	}
+	title := txt.Bold(true).Render(termenv.Hyperlink(m.apod.Link(), m.apod.Title))
+
+	if rest := width - lipgloss.Width(header); lipgloss.Width(title)+4 <= rest {
+		// title fits beside the header: center it in the remaining width
+		s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, header, txt.Width(rest).Align(lipgloss.Center).Render(title)))
+		s.WriteString("\n")
+		s.WriteString(dateLine)
+		s.WriteString("\n")
+		s.WriteString("\n")
+	} else {
+		s.WriteString(header)
+		s.WriteString("\n")
+		s.WriteString(dateLine)
+		s.WriteString("\n\n\n")
+		s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(title))
+		s.WriteString("\n\n")
+	}
 
 	if writeExplanation {
 		s.WriteString(txt.Render(wordwrap.String(m.apod.Explanation, width)))
