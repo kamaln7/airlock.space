@@ -179,8 +179,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copiedRecently = false
 	}
 
-	if m.State != prevState {
-		// re-run hover hit-testing against the new page's layout
+	// re-run hover hit-testing whenever the layout may have changed under a
+	// stationary mouse: any keypress (footer items appear/disappear even
+	// within a state, e.g. the explanation/image toggle) or state change
+	if _, isKey := msg.(tea.KeyMsg); isKey || m.State != prevState {
 		m.hoverKey = m.helpHitTest(m.mouseX, m.mouseY)
 		m.hoverLink = m.linkHitTest(m.mouseX, m.mouseY)
 	}
@@ -366,7 +368,13 @@ func (m *Model) helpKeys() []key.Binding {
 	case StateFullscreen:
 		return []key.Binding{keyFullscreen}
 	}
-	keys := []key.Binding{keyExplanation, keyLink, keyReload, keyFullscreen, keyQuit}
+	// show only the action the key would perform, not both toggle sides
+	eDesc := "image"
+	if m.imgOrExplanation {
+		eDesc = "explanation"
+	}
+	keyExpl := key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc))
+	keys := []key.Binding{keyExpl, keyLink, keyReload, keyFullscreen, keyQuit}
 	// photo/art toggle only where the image is on screen
 	if m.kittySent && m.imgOrExplanation {
 		keys = slices.Insert(keys, 4, keyPhoto)
@@ -594,9 +602,11 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 	title := txt.Bold(true).Render(termenv.Hyperlink(m.apod.Link(), m.apod.Title))
 
-	if rest := width - lipgloss.Width(header); lipgloss.Width(title)+4 <= rest {
-		// title fits beside the header: center it in the remaining width
-		s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, header, txt.Width(rest).Align(lipgloss.Center).Render(title)))
+	// center the title relative to the viewport, not the space next to the
+	// header; overlay works when the centered span clears the header
+	titleStart := (width - lipgloss.Width(title)) / 2
+	if titleStart >= lipgloss.Width(header)+4 {
+		s.WriteString(header + strings.Repeat(" ", titleStart-lipgloss.Width(header)) + title)
 		s.WriteString("\n")
 		s.WriteString(dateLine)
 		s.WriteString("\n")
