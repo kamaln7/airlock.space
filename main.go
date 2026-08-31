@@ -58,6 +58,7 @@ type Model struct {
 	selAnchor        point // in-app text selection (mouse tracking eats the
 	selEnd           point // terminal's own selection, so we provide our own)
 	selActive        bool
+	selPending       bool   // left button went down inside the selectable region
 	artKey           string // memoized decorative art (stable across renders)
 	art              string
 	placedCols       int // current kitty virtual placement size
@@ -106,6 +107,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
+			// ctrl+c (which is also what ctrl+shift+c arrives as) copies an
+			// active selection instead of quitting; q always quits
+			if m.selActive && msg.String() == "ctrl+c" {
+				if text := m.selectionText(); text != "" {
+					io.WriteString(m.Session, osc52Copy(text))
+				}
+				break
+			}
 			return m, tea.Quit
 		case key.Matches(msg, keyExplanation):
 			m.State = StateAPOD
@@ -142,18 +151,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		switch {
 		case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft:
-			// drag: extend the text selection
+			// drag: extend the text selection (copy happens on ctrl+c)
 			m.mouseX, m.mouseY = msg.X, msg.Y
-			m.selEnd = point{msg.X, msg.Y}
-			m.selActive = true
+			if m.selPending {
+				m.selEnd = m.clampSelPoint(point{msg.X, msg.Y})
+				m.selActive = m.selEnd != m.selAnchor
+			}
 		case msg.Action == tea.MouseActionMotion:
 			m.mouseX, m.mouseY = msg.X, msg.Y
 			m.hoverKey = m.helpHitTest(msg.X, msg.Y)
 			m.hoverLink = m.linkHitTest(msg.X, msg.Y)
 		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
-			m.selActive = false
-			m.selAnchor = point{msg.X, msg.Y}
-			m.selEnd = m.selAnchor
+			m.selActive, m.selPending = false, false
 			if k := m.helpHitTest(msg.X, msg.Y); k != "" {
 				// dispatch the clicked help item as if its key was pressed
 				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
@@ -161,10 +170,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.linkHitTest(msg.X, msg.Y) {
 				cmds = append(cmds, m.copyLink())
 			}
-		case msg.Action == tea.MouseActionRelease && m.selActive:
-			// copy the selection to the client clipboard, like a terminal would
-			if text := m.selectionText(); text != "" {
-				io.WriteString(m.Session, osc52Copy(text))
+			if m.inSelRegion(point{msg.X, msg.Y}) {
+				m.selPending = true
+				m.selAnchor = m.clampSelPoint(point{msg.X, msg.Y})
+				m.selEnd = m.selAnchor
 			}
 		}
 	case apodMsg:
@@ -426,6 +435,51 @@ func (m *Model) viewHelp() string {
 
 type point struct{ X, Y int }
 
+// selRegion is the selectable area: the text column (header, title,
+// explanation) of the explanation view. Returns its column bounds.
+func (m *Model) selRegion() (colStart, colEnd int, ok bool) {
+	if m.State != StateAPOD || m.imgOrExplanation {
+		return 0, 0, false
+	}
+	return 1, 1 + min(72, m.Width-2), true // 1 for the left margin
+}
+
+// helpRowIndex locates the help bar's screen row, or -1.
+func (m *Model) helpRowIndex() int {
+	lines := strings.Split(m.View(), "\n")
+	for i, l := range lines {
+		if m.isHelpLine(ansi.Strip(l)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) inSelRegion(p point) bool {
+	colStart, colEnd, ok := m.selRegion()
+	if !ok || p.X < colStart || p.X >= colEnd {
+		return false
+	}
+	if hr := m.helpRowIndex(); hr >= 0 && p.Y >= hr {
+		return false
+	}
+	return true
+}
+
+func (m *Model) clampSelPoint(p point) point {
+	colStart, colEnd, ok := m.selRegion()
+	if !ok {
+		return p
+	}
+	p.X = min(max(p.X, colStart), colEnd-1)
+	p.Y = max(p.Y, 0)
+	if hr := m.helpRowIndex(); hr >= 0 && p.Y >= hr {
+		p.Y = hr - 1
+		p.X = colEnd - 1
+	}
+	return p
+}
+
 // selBounds returns the selection corners in top-to-bottom order.
 func (m *Model) selBounds() (a, b point) {
 	a, b = m.selAnchor, m.selEnd
@@ -435,22 +489,34 @@ func (m *Model) selBounds() (a, b point) {
 	return a, b
 }
 
+// selSpan gives the selected column range on row y, clamped to the text column.
+func (m *Model) selSpan(y, lineWidth int) (x1, x2 int, ok bool) {
+	colStart, colEnd, regionOK := m.selRegion()
+	if !regionOK {
+		return 0, 0, false
+	}
+	a, b := m.selBounds()
+	if y < a.Y || y > b.Y {
+		return 0, 0, false
+	}
+	x1, x2 = colStart, min(colEnd, lineWidth)
+	if y == a.Y {
+		x1 = a.X
+	}
+	if y == b.Y {
+		x2 = min(b.X+1, x2)
+	}
+	return x1, x2, x1 < x2
+}
+
 // applySelection overlays reverse-video highlighting on the selected region.
-// Linewise, like terminal selection: full lines between the endpoints.
 func (m *Model) applySelection(frame string) string {
 	lines := strings.Split(frame, "\n")
 	a, b := m.selBounds()
 	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
 		line := lines[y]
-		width := ansi.StringWidth(line)
-		x1, x2 := 0, width
-		if y == a.Y {
-			x1 = min(a.X, width)
-		}
-		if y == b.Y {
-			x2 = min(b.X+1, width)
-		}
-		if x1 >= x2 {
+		x1, x2, ok := m.selSpan(y, ansi.StringWidth(line))
+		if !ok {
 			continue
 		}
 		// the selected span loses its colors (stripped) — standard selection look
@@ -467,14 +533,8 @@ func (m *Model) selectionText() string {
 	var out []string
 	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
 		line := ansi.Strip(lines[y])
-		x1, x2 := 0, ansi.StringWidth(line)
-		if y == a.Y {
-			x1 = x1 + a.X
-		}
-		if y == b.Y {
-			x2 = min(b.X+1, x2)
-		}
-		if x1 >= x2 {
+		x1, x2, ok := m.selSpan(y, ansi.StringWidth(line))
+		if !ok {
 			out = append(out, "")
 			continue
 		}
@@ -504,22 +564,26 @@ func (m *Model) frameLine(y int) string {
 	return ansi.Strip(lines[y])
 }
 
-// helpHitTest returns the key under the mouse position, or "".
-func (m *Model) helpHitTest(x, y int) string {
-	line := m.frameLine(y)
-	keys := m.helpKeys()
-	// only treat the line as the help bar if most items are present
+// isHelpLine reports whether a stripped frame line is the help bar (most
+// items present).
+func (m *Model) isHelpLine(line string) bool {
 	matches := 0
-	for _, k := range keys {
+	for _, k := range m.helpKeys() {
 		h := k.Help()
 		if strings.Contains(line, h.Key+" "+h.Desc) {
 			matches++
 		}
 	}
-	if matches < 2 {
+	return matches >= 2
+}
+
+// helpHitTest returns the key under the mouse position, or "".
+func (m *Model) helpHitTest(x, y int) string {
+	line := m.frameLine(y)
+	if !m.isHelpLine(line) {
 		return ""
 	}
-	for _, k := range keys {
+	for _, k := range m.helpKeys() {
 		h := k.Help()
 		if start, end, ok := columnSpan(line, h.Key+" "+h.Desc); ok && x >= start && x < end {
 			return h.Key
