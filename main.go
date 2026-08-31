@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"github.com/samber/lo"
 	lom "github.com/samber/lo/mutable"
 )
+
+var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
 
 var (
 	colorMuted      = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
@@ -85,9 +88,16 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.loadAPOD(), spinTick())
 }
 
+// selectionMode reports whether mouse tracking should be off so the terminal's
+// native text selection works: the explanation view is the one people copy from.
+func (m *Model) selectionMode() bool {
+	return m.State == StateAPOD && !m.imgOrExplanation
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	prevState := m.State
+	prevSelection := m.selectionMode()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -175,6 +185,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, isKey := msg.(tea.KeyMsg); isKey || m.State != prevState {
 		m.hoverKey = m.helpHitTest(m.mouseX, m.mouseY)
 		m.hoverLink = m.linkHitTest(m.mouseX, m.mouseY)
+	}
+
+	if sel := m.selectionMode(); sel != prevSelection {
+		if sel {
+			m.hoverKey, m.hoverLink = "", false
+			cmds = append(cmds, tea.DisableMouse)
+		} else {
+			cmds = append(cmds, tea.EnableMouseAllMotion)
+		}
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -277,7 +296,7 @@ func (m *Model) View() string {
 func (m *Model) viewAPOD() string {
 	showImage := m.imgOrExplanation && (m.imageOK || m.imageLoading)
 	totalWidth := m.Width - 2 // -2 for the margin
-	apodWidth := min(60, totalWidth)
+	apodWidth := min(72, totalWidth)
 	freeWidth := totalWidth - apodWidth
 	if showImage {
 		// full-width apod if we are showing the image
@@ -310,11 +329,15 @@ func (m *Model) viewAPOD() string {
 	} else {
 		asciiArt := m.decorArt(freeWidth, freeHeight)
 
-		return m.Style.Margin(1, 1, 0, 1).Render(
-			lipgloss.JoinHorizontal(lipgloss.Top,
-				apodView+helpView,
-				m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
-			),
+		textCol := apodView + helpView
+		content := lipgloss.JoinHorizontal(lipgloss.Top,
+			textCol,
+			m.Style.Width(freeWidth).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
+		)
+		// vertically center the whole block; tall windows otherwise leave a
+		// wall of dead space below
+		return m.Style.Margin(0, 1).Render(
+			lipgloss.Place(totalWidth, m.Height, lipgloss.Left, lipgloss.Center, content),
 		)
 	}
 }
@@ -607,7 +630,10 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 
 	if writeExplanation {
-		s.WriteString(txt.Render(wordwrap.String(m.apod.Explanation, width)))
+		// NASA separates appended notices with runs of spaces; give them
+		// real paragraph breaks
+		expl := paragraphBreaks.ReplaceAllString(m.apod.Explanation, "\n\n")
+		s.WriteString(txt.Render(wordwrap.String(expl, width)))
 		s.WriteString("\n")
 	}
 
