@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -650,6 +651,28 @@ func TestFullscreenStacksHelpBesideATallPicture(t *testing.T) {
 			t.Errorf("%q shares row %d; stacked help is one item to a row", k, r)
 		}
 		seen[r] = true
+	}
+
+	// the keys line up with each other down the margin, not each centered on
+	// its own row
+	col := -1
+	for _, r := range slices.Sorted(maps.Values(rows)) {
+		s := ansi.Strip(lines[r])
+		at := ansi.StringWidth(s) - ansi.StringWidth(strings.TrimLeft(s, " "))
+		if col < 0 {
+			col = at
+		} else if at != col {
+			t.Errorf("stacked help starts at column %d on row %d, %d elsewhere", at, r, col)
+		}
+	}
+	if col < 1 {
+		t.Errorf("stacked help is jammed against the screen edge at column %d", col)
+	}
+
+	// and vertically centered against the picture
+	first, last := slices.Min(slices.Collect(maps.Values(rows))), slices.Max(slices.Collect(maps.Values(rows)))
+	if mid := (first + last) / 2; mid < m.Height/2-2 || mid > m.Height/2+2 {
+		t.Errorf("stacked help centers on row %d of %d", mid, m.Height)
 	}
 
 	// the two-item rule cannot see a lone item, so hit-testing has to know

@@ -511,6 +511,9 @@ const (
 	imageMinWidth = 24 // narrower than this and a picture is not worth the room
 	paneGap       = 4
 	wideAspect    = 1.4 // past this a picture wants the width a text column wants
+
+	// helpGutterPad keeps the stacked keys off the very edge of the screen
+	helpGutterPad = 2
 )
 
 // imageIsWide reports whether the picture would rather have the full width
@@ -1283,11 +1286,13 @@ func (m *Model) viewFullscreen() string {
 	imgW, imgH := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y,
 		m.Width, m.Height, m.cellAspect())
 	stacked := m.viewHelpStacked()
-	if side := (m.Width - imgW) / 2; side >= lipgloss.Width(stacked)+2 {
+	if side := (m.Width - imgW) / 2; side >= lipgloss.Width(stacked)+helpGutterPad {
+		// centered down the margin, but the keys line up with each other
+		// rather than each row centering on its own and coming out ragged
 		gutter := txt.Width(side).Height(imgH).AlignVertical(lipgloss.Center)
 		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center,
 			lipgloss.JoinHorizontal(lipgloss.Top,
-				gutter.Align(lipgloss.Center).Render(stacked),
+				gutter.Align(lipgloss.Left).PaddingLeft(helpGutterPad).Render(stacked),
 				txt.Width(imgW).Render(m.imageArea(imgW, imgH)),
 				gutter.Render(""),
 			))
