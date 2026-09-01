@@ -41,5 +41,5 @@ func main() {
 		os.Exit(1)
 	}
 	// the model kept the last size the terminal reported
-	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye(m.Width))
+	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye(m.Width, "local"))
 }

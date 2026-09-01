@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -21,7 +22,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/samber/lo"
-	lom "github.com/samber/lo/mutable"
 )
 
 var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
@@ -1050,7 +1050,7 @@ func countLines(str string) int {
 // Goodbye is printed on exit, outside the alt screen. It writes truecolor
 // escapes; the caller sends them through a colorprofile.Writer, which
 // downsamples them to what the client can show.
-func Goodbye(width int) string {
+func Goodbye(width int, client string) string {
 	if width <= 0 {
 		width = 80 // no size to hand: assume the classic terminal
 	}
@@ -1064,7 +1064,7 @@ func Goodbye(width int) string {
 	// Printed to the scrollback, where height costs nothing, so only width is
 	// a real limit - and every art has to fit some terminal, or the shuffle
 	// returns the same one every time.
-	art := randomArt(width-2, 40,
+	art := randomArt(client, width-2, 40,
 		colorMuted.dark, colorCosmic.dark, colorStellar.dark, colorNebula.dark)
 	if art != "" {
 		art = "\n" + art + "\n"
@@ -1083,17 +1083,63 @@ func Goodbye(width int) string {
 		msg)
 }
 
-// randomArt picks an ascii art that fits a box of cells, colorized. Nothing
-// memoizes it any more: it is drawn once, on the way out.
-func randomArt(maxWidth, maxHeight int, colors ...color.Color) string {
-	all := slices.Clone(ASCIIAll)
-	lom.Shuffle(all)
-	for _, art := range all {
-		if countLines(art) <= maxHeight && lipgloss.Width(art) <= maxWidth {
-			return colorize(art, colors...)
+// artMemory bounds how many clients the goodbye remembers. The log is a
+// nicety on a 512MB box, so it is capped and the least recently seen client is
+// forgotten first. What each one holds is bounded too: once a client has seen
+// every art that fits, the slate is wiped and they start again.
+const artMemory = 256
+
+// ponytail: eviction walks the order slice, which is fine at 256 entries and
+// once per session; a real LRU if the cap ever grows.
+var artLog = struct {
+	sync.Mutex
+	seen  map[string][]int // client -> art indices shown lately
+	order []string         // least recently seen first
+}{seen: map[string][]int{}}
+
+// pickArt chooses one of the arts that fit, preferring any this client has not
+// been shown lately, so a returning visitor gets a different drawing.
+func pickArt(client string, fits []int) int {
+	artLog.Lock()
+	defer artLog.Unlock()
+
+	seen := artLog.seen[client]
+	unseen := make([]int, 0, len(fits))
+	for _, i := range fits {
+		if !slices.Contains(seen, i) {
+			unseen = append(unseen, i)
 		}
 	}
-	return ""
+	if len(unseen) == 0 {
+		// they have had them all; forget and start the rotation over
+		unseen, seen = fits, nil
+	}
+	pick := lo.Sample(unseen)
+
+	artLog.seen[client] = append(seen, pick)
+	artLog.order = append(slices.DeleteFunc(artLog.order, func(c string) bool {
+		return c == client
+	}), client)
+	for len(artLog.order) > artMemory {
+		delete(artLog.seen, artLog.order[0])
+		artLog.order = artLog.order[1:]
+	}
+	return pick
+}
+
+// randomArt picks an ascii art that fits a box of cells, colorized, avoiding
+// what this client saw last time where it can.
+func randomArt(client string, maxWidth, maxHeight int, colors ...color.Color) string {
+	var fits []int
+	for i, art := range ASCIIAll {
+		if countLines(art) <= maxHeight && lipgloss.Width(art) <= maxWidth {
+			fits = append(fits, i)
+		}
+	}
+	if len(fits) == 0 {
+		return ""
+	}
+	return colorize(ASCIIAll[pickArt(client, fits)], colors...)
 }
 
 // applyArtDefault picks art vs real photo until the user toggles explicitly:

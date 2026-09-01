@@ -443,13 +443,13 @@ func TestMergedLayoutFits(t *testing.T) {
 func TestGoodbyeArtIsActuallyVaried(t *testing.T) {
 	seen := map[string]bool{}
 	for range 60 {
-		seen[randomArt(78, 40, colorMuted.dark)] = true
+		seen[randomArt("varied", 78, 40, colorMuted.dark)] = true
 	}
 	if len(seen) < len(ASCIIAll) {
 		t.Errorf("only %d of %d arts ever drawn at 78 columns", len(seen), len(ASCIIAll))
 	}
 	// a narrow terminal still gets something, and it fits
-	art := randomArt(34, 40, colorMuted.dark)
+	art := randomArt("narrow", 34, 40, colorMuted.dark)
 	if art == "" {
 		t.Fatal("no art fits 34 columns")
 	}
@@ -460,11 +460,11 @@ func TestGoodbyeArtIsActuallyVaried(t *testing.T) {
 
 // the goodbye is the art's home now; it has to actually be in there
 func TestGoodbyeCarriesArt(t *testing.T) {
-	out := ansi.Strip(Goodbye(100))
+	out := ansi.Strip(Goodbye(100, "carries"))
 	if !strings.Contains(out, "thanks for visiting") {
 		t.Fatal("no farewell in the goodbye")
 	}
-	art := randomArt(98, 40, colorMuted.dark)
+	art := randomArt("carries", 98, 40, colorMuted.dark)
 	if art == "" {
 		t.Fatal("no art fits, so the check below proves nothing")
 	}
@@ -697,6 +697,68 @@ func TestScrollHintIsNotAFrameLate(t *testing.T) {
 	if !strings.Contains(first, "scroll") {
 		t.Error("the first frame offers no scroll hint for a scrolling explanation")
 	}
+}
+
+// a returning visitor should get a drawing they have not just seen, until
+// they have seen them all and the rotation starts over
+func TestGoodbyeArtRotatesPerClient(t *testing.T) {
+	fits := []int{}
+	for i, a := range ASCIIAll {
+		if countLines(a) <= 40 && lipgloss.Width(a) <= 98 {
+			fits = append(fits, i)
+		}
+	}
+	if len(fits) < 3 {
+		t.Fatalf("only %d arts fit; this proves little", len(fits))
+	}
+
+	var run []int
+	for range len(fits) {
+		run = append(run, pickArt("alice", fits))
+	}
+	if len(slices.Compact(slices.Sorted(slices.Values(run)))) != len(fits) {
+		t.Errorf("a full rotation repeated itself: %v", run)
+	}
+	// the next one starts a fresh rotation rather than running dry
+	if got := pickArt("alice", fits); !slices.Contains(fits, got) {
+		t.Errorf("pickArt returned %d, not one of %v", got, fits)
+	}
+
+	// one visitor's rotation is not another's
+	artLogReset()
+	a, b := pickArt("alice", fits), pickArt("bob", fits)
+	if got := pickArt("alice", fits); got == a {
+		t.Error("alice was shown the same art twice running")
+	}
+	_ = b
+}
+
+// the log is a nicety on a small box: it must not grow without bound
+func TestGoodbyeArtLogIsBounded(t *testing.T) {
+	artLogReset()
+	fits := []int{0}
+	for i := range artMemory * 2 {
+		pickArt(fmt.Sprintf("client-%d", i), fits)
+	}
+	artLog.Lock()
+	defer artLog.Unlock()
+	if len(artLog.seen) > artMemory || len(artLog.order) > artMemory {
+		t.Errorf("log holds %d clients (order %d); cap is %d",
+			len(artLog.seen), len(artLog.order), artMemory)
+	}
+	// the oldest client is the one forgotten
+	if _, ok := artLog.seen["client-0"]; ok {
+		t.Error("kept the least recently seen client and evicted someone newer")
+	}
+	if _, ok := artLog.seen[fmt.Sprintf("client-%d", artMemory*2-1)]; !ok {
+		t.Error("forgot the most recent client")
+	}
+}
+
+func artLogReset() {
+	artLog.Lock()
+	defer artLog.Unlock()
+	artLog.seen, artLog.order = map[string][]int{}, nil
 }
 
 // a slow day that the user has already navigated away from must not land

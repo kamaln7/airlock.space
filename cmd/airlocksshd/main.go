@@ -52,7 +52,7 @@ func main() {
 					if pty, _, ok := s.Pty(); ok {
 						cols = pty.Window.Width
 					}
-					w.WriteString(airlockspace.Goodbye(cols))
+					w.WriteString(airlockspace.Goodbye(cols, clientKey(s)))
 				}
 			},
 			// middleware runs in reverse order, so activeterm goes last here to
@@ -146,6 +146,18 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		tea.WithColorProfile(sessionProfile(s)),
 	)
 	return m, opts
+}
+
+// clientKey identifies a returning visitor well enough to vary their goodbye
+// art. The port changes per connection, so only the host counts.
+// ponytail: everyone behind one NAT shares a key and so a rotation; it is an
+// ascii drawing, not a session.
+func clientKey(s ssh.Session) string {
+	host, _, err := net.SplitHostPort(s.RemoteAddr().String())
+	if err != nil {
+		return s.RemoteAddr().String()
+	}
+	return host
 }
 
 // termProgram is how iTerm2 and friends announce themselves. Over ssh it only
