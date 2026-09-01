@@ -1,7 +1,10 @@
 package apod
 
 import (
+	"bytes"
 	"errors"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,4 +40,78 @@ func TestVideoDayResolvesToNilBytes(t *testing.T) {
 			t.Fatalf("ImageBytes() = %v, %v; want nil, nil", byt, err)
 		}
 	}
+}
+
+func TestImageCacheSurvivesANewAPODInstance(t *testing.T) {
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = imageCacheDir() }()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(onePixelPNG(t))
+	}))
+	defer srv.Close()
+
+	img := &nasa.Image{Date: "2026-08-30", URL: srv.URL + "/apod.png"}
+	first, err := newAPOD(img).ImageBytes()
+	if err != nil || len(first) == 0 {
+		t.Fatalf("ImageBytes() = %d bytes, %v", len(first), err)
+	}
+
+	// a fresh instance stands in for the day being evicted from memory, or the
+	// process restarting: the bytes must come off disk, not the network
+	again := newAPOD(img)
+	second, err := again.ImageBytes()
+	if err != nil || !bytes.Equal(second, first) {
+		t.Fatalf("cached ImageBytes() = %d bytes, %v; want the same %d", len(second), err, len(first))
+	}
+	if hits != 1 {
+		t.Errorf("fetched %d times; want 1", hits)
+	}
+	if again.ImageSize.X != 1 || again.ImageSize.Y != 1 {
+		t.Errorf("ImageSize = %v; want 1x1 from the cached bytes", again.ImageSize)
+	}
+}
+
+func TestVideoDayIsCachedOnDiskToo(t *testing.T) {
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = imageCacheDir() }()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "video/mp4")
+	}))
+	defer srv.Close()
+
+	img := &nasa.Image{Date: "2026-08-31", URL: srv.URL + "/apod.mp4"}
+	for range 2 {
+		if byt, err := newAPOD(img).ImageBytes(); err != nil || byt != nil {
+			t.Fatalf("ImageBytes() = %v, %v; want nil, nil", byt, err)
+		}
+	}
+	if hits != 1 {
+		t.Errorf("fetched %d times; want 1", hits)
+	}
+}
+
+func TestCachePathRejectsADateThatIsNotOne(t *testing.T) {
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = imageCacheDir() }()
+
+	a := &APOD{Image: &nasa.Image{Date: "../../etc/passwd"}}
+	if got := a.cachePath(); got != "" {
+		t.Errorf("cachePath() = %q; want empty", got)
+	}
+}
+
+func onePixelPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

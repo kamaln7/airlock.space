@@ -112,3 +112,88 @@ func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
 	}
 	t.Fatal("no link row in the frame")
 }
+
+func day(y int, mo time.Month, d int) time.Time {
+	return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
+}
+
+func testModel(t *testing.T, date time.Time) *Model {
+	t.Helper()
+	m := &Model{Width: 100, Height: 40, Style: lipgloss.NewStyle(),
+		date: date, latest: day(2026, 8, 31),
+		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
+			Explanation: "some words about space.", ApodDate: date}}}
+	m.State = StateAPOD
+	return m
+}
+
+func press(m *Model, k tea.KeyType) {
+	m.Update(tea.KeyMsg{Type: k})
+}
+
+func TestDayNavigationStaysInRange(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31)) // the latest day
+	press(m, tea.KeyRight)
+	if !m.date.Equal(day(2026, 8, 31)) {
+		t.Errorf("right past the latest day moved to %v", m.date)
+	}
+	press(m, tea.KeyLeft)
+	if !m.date.Equal(day(2026, 8, 30)) {
+		t.Errorf("left = %v; want 2026-08-30", m.date)
+	}
+	if m.State != StateLoading {
+		t.Errorf("State = %v; want the spinner while the day loads", m.State)
+	}
+
+	m = testModel(t, apod.First)
+	press(m, tea.KeyLeft)
+	if !m.date.Equal(apod.First) {
+		t.Errorf("left before the first APOD moved to %v", m.date)
+	}
+}
+
+func TestDayNavigationFooter(t *testing.T) {
+	shown := func(m *Model) string {
+		var s string
+		for _, k := range m.helpKeys() {
+			s += k.Help().Key
+		}
+		return s
+	}
+	if got := shown(testModel(t, day(2026, 8, 31))); strings.Contains(got, "→") {
+		t.Errorf("next-day offered on the latest day: %q", got)
+	}
+	if got := shown(testModel(t, day(2026, 8, 20))); !strings.Contains(got, "→") {
+		t.Errorf("next-day missing on an older day: %q", got)
+	}
+	if got := shown(testModel(t, apod.First)); strings.Contains(got, "←") {
+		t.Errorf("prev-day offered on the first APOD: %q", got)
+	}
+}
+
+// a slow day that the user has already navigated away from must not land
+func TestStaleDayResponseIsDropped(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	press(m, tea.KeyLeft) // now waiting on the 30th
+	overtaken := &apod.APOD{Image: &nasa.Image{Title: "Overtaken", ApodDate: day(2026, 8, 25)}}
+	m.Update(apodMsg{date: day(2026, 8, 25), apod: overtaken})
+	if m.apod.Title == "Overtaken" {
+		t.Error("a response for a day we left applied anyway")
+	}
+
+	wanted := &apod.APOD{Image: &nasa.Image{Title: "Wanted", ApodDate: day(2026, 8, 30)}}
+	m.Update(apodMsg{date: day(2026, 8, 30), apod: wanted})
+	if m.apod.Title != "Wanted" || m.State != StateAPOD {
+		t.Errorf("apod = %q, state = %v; want the day we asked for", m.apod.Title, m.State)
+	}
+}
+
+// a failed day leaves the reader on the day already on screen
+func TestFailedDayKeepsTheCurrentOne(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	press(m, tea.KeyLeft)
+	m.Update(apodMsg{date: day(2026, 8, 30), apod: nil})
+	if !m.date.Equal(day(2026, 8, 31)) || m.State != StateAPOD {
+		t.Errorf("date = %v, state = %v; want to stay on 2026-08-31", m.date, m.State)
+	}
+}

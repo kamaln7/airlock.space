@@ -58,10 +58,12 @@ type Model struct {
 	State            State
 	imgOrExplanation bool // true -> img, false -> explanation
 	apod             *apod.APOD
-	imageOK          bool // image bytes are ready to render
-	kittySent        bool // image transmitted to the client's terminal
-	preferArt        bool // sextant art instead of the real photo
-	photoToggled     bool // user overrode the art/photo default with the keybind
+	date             time.Time // the day being browsed; zero until the first load
+	latest           time.Time // the most recent day NASA has posted
+	imageOK          bool      // image bytes are ready to render
+	kittySent        bool      // image transmitted to the client's terminal
+	preferArt        bool      // sextant art instead of the real photo
+	photoToggled     bool      // user overrode the art/photo default with the keybind
 	copiedRecently   bool
 	hoverKey         string // help bar item under the mouse
 	hoverLink        bool   // mouse is over the URL under the explanation
@@ -112,7 +114,7 @@ func (m *Model) spinnerView() string {
 
 func (m *Model) Init() tea.Cmd {
 	m.imgOrExplanation = true
-	return tea.Batch(m.loadAPOD(), spinTick())
+	return tea.Batch(m.loadAPOD(m.date), spinTick())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -128,6 +130,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, keyQuit):
 			return m, tea.Quit
+		case key.Matches(msg, keyPrevDay):
+			cmds = append(cmds, m.showDay(m.date.AddDate(0, 0, -1)))
+		case key.Matches(msg, keyNextDay):
+			cmds = append(cmds, m.showDay(m.date.AddDate(0, 0, 1)))
 		case key.Matches(msg, keyExplanation):
 			// nothing to toggle to on a video day: the explanation is all there is
 			if !m.imageOK && !m.imageLoading {
@@ -193,15 +199,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case apodMsg:
-		m.apod = msg
+		if !msg.date.Equal(m.date) {
+			break // a later day was asked for while this one was loading
+		}
+		if msg.apod == nil {
+			if m.apod != nil {
+				m.date = m.apod.ApodDate // stay on the day we are already showing
+			}
+			m.State = StateAPOD
+			break
+		}
+		m.apod = msg.apod
+		m.date = msg.apod.ApodDate
+		if msg.apod.ApodDate.After(m.latest) {
+			m.latest = msg.apod.ApodDate // NASA posted a new one under us
+		}
 		m.imageOK = false
 		m.kittySent = false
+		m.imageLoading = true
 		m.placedCols, m.placedRows = 0, 0
 		m.State = StateAPOD
-		if msg != nil {
-			m.imageLoading = true
-			cmds = append(cmds, m.loadImage())
-		}
+		cmds = append(cmds, m.loadImage())
 	case imageMsg:
 		m.imageOK = msg.ok
 		m.kittySent = msg.kittySent
@@ -226,23 +244,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-type apodMsg *apod.APOD
+// apodMsg carries the day that was asked for, so a slow answer that a later
+// keypress has already overtaken can be dropped.
+type apodMsg struct {
+	date time.Time
+	apod *apod.APOD
+}
 
 type imageMsg struct {
 	ok        bool
 	kittySent bool
 }
 
-func (m *Model) loadAPOD() tea.Cmd {
+// showDay switches to a day, if there is one there: NASA has nothing before
+// First and nothing after the latest post. Loading takes a moment, so the
+// spinner comes back while it does.
+func (m *Model) showDay(date time.Time) tea.Cmd {
+	if m.apod == nil || date.Before(apod.First) || date.After(m.latest) {
+		return nil
+	}
+	m.date = date
+	m.State = StateLoading
+	m.artKey = "" // reshuffle the decorative art, as on any other interaction
+	return m.loadAPOD(date)
+}
+
+// loadAPOD fetches one day. The zero date, and the latest day, go through
+// Today: it is the only path that notices when NASA posts a new picture.
+func (m *Model) loadAPOD(date time.Time) tea.Cmd {
+	latest := m.latest
 	return func() tea.Msg {
-		a, err := apod.Today()
+		var a *apod.APOD
+		var err error
+		if date.IsZero() || date.Equal(latest) {
+			a, err = apod.Today()
+		} else {
+			a, err = apod.ByDate(date)
+		}
 		if err != nil {
-			slog.Warn("failed to get APOD", "error", err)
+			slog.Warn("failed to get APOD", "error", err, "date", date)
 			if a == nil {
 				slog.Error("no valid APOD to fallback to", "error", err)
 			}
 		}
-		return apodMsg(a)
+		return apodMsg{date: date, apod: a}
 	}
 }
 
@@ -268,6 +313,15 @@ func (m *Model) loadImage() tea.Cmd {
 }
 
 var (
+	// the arrow glyphs are keys too, so clicking the footer item dispatches them
+	keyPrevDay = key.NewBinding(
+		key.WithKeys("left", "h", "\u2190"),
+		key.WithHelp("\u2190", "prev day"),
+	)
+	keyNextDay = key.NewBinding(
+		key.WithKeys("right", "l", "\u2192"),
+		key.WithHelp("\u2192", "next day"),
+	)
 	keyQuit = key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
@@ -400,7 +454,15 @@ func (m *Model) helpKeys() []key.Binding {
 	case StateFullscreen:
 		return []key.Binding{keyFullscreen}
 	}
-	keys := []key.Binding{keyCopy, keyQuit}
+	var keys []key.Binding
+	if m.apod != nil {
+		if m.date.After(apod.First) {
+			keys = append(keys, keyPrevDay)
+		}
+		if m.date.Before(m.latest) {
+			keys = append(keys, keyNextDay)
+		}
+	}
 	// no image to toggle to on a video day, so no e
 	if m.imageOK || m.imageLoading {
 		// show only the action the key would perform, not both toggle sides
@@ -408,21 +470,20 @@ func (m *Model) helpKeys() []key.Binding {
 		if m.showingImage() {
 			eDesc = "explanation"
 		}
-		keys = slices.Insert(keys, 0, key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc)))
+		keys = append(keys, key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc)))
 	}
 	if m.showingImage() {
-		keys = slices.Insert(keys, len(keys)-1, keyFullscreen)
-	}
-	// image/ascii toggle only where the image is on screen; action-only label
-	if m.kittySent && m.showingImage() {
-		pDesc := "ascii"
-		if m.preferArt {
-			pDesc = "image"
+		keys = append(keys, keyFullscreen)
+		// image/ascii toggle only where the image is on screen; action-only label
+		if m.kittySent {
+			pDesc := "ascii"
+			if m.preferArt {
+				pDesc = "image"
+			}
+			keys = append(keys, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
 		}
-		// q quit stays last
-		keys = slices.Insert(keys, len(keys)-1, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
 	}
-	return keys
+	return append(keys, keyCopy, keyQuit) // q quit stays last
 }
 
 // viewHelp renders the help bar. Items under the mouse are highlighted; Update

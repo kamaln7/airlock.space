@@ -57,22 +57,21 @@ func renderSextant(img image.Image, cols, rows int, mode chafa.CanvasMode) strin
 
 // renderCache shares rendered frames across all sessions: everyone is looking
 // at the same APOD and terminal sizes cluster around a few common ones.
-// ponytail: unbounded within a day, wiped when the APOD date changes
+// renders are keyed by day as well as size, so stepping back to a day already
+// seen redraws from memory.
+// ponytail: emptied wholesale at the cap rather than evicting an entry
+const maxRenders = 64
+
 var renderCache = struct {
 	sync.Mutex
-	date    string
 	entries map[string]string
 }{entries: map[string]string{}}
 
 // decodeFn matches apod.(*APOD).Decode: decode fresh, drop after render.
 func cachedSextant(date string, decode func() (image.Image, error), cols, rows int, mode chafa.CanvasMode) (string, error) {
-	key := fmt.Sprintf("%dx%d|%d", cols, rows, mode)
+	key := fmt.Sprintf("%s|%dx%d|%d", date, cols, rows, mode)
 
 	renderCache.Lock()
-	if renderCache.date != date {
-		renderCache.date = date
-		renderCache.entries = map[string]string{}
-	}
 	if s, ok := renderCache.entries[key]; ok {
 		renderCache.Unlock()
 		return s, nil
@@ -86,6 +85,9 @@ func cachedSextant(date string, decode func() (image.Image, error), cols, rows i
 	s := renderSextant(img, cols, rows, mode)
 
 	renderCache.Lock()
+	if len(renderCache.entries) >= maxRenders {
+		clear(renderCache.entries)
+	}
 	renderCache.entries[key] = s
 	renderCache.Unlock()
 	return s, nil

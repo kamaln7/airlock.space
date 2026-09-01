@@ -6,13 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	_ "image/gif"  // decoders for whatever NASA posts: registering them here is
+	_ "image/jpeg" // this package's business, not a dependency's to do by accident
 	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kamaln7/resolvable/v2"
@@ -40,6 +44,54 @@ type APOD struct {
 
 	// ImageSize is set once ImageBytes has resolved.
 	ImageSize image.Point
+}
+
+// First is the day APOD began; there is nothing to browse before it.
+var First = time.Date(1995, 6, 16, 0, 0, 0, 0, time.UTC)
+
+// daysInMemory bounds the browsable history kept in RAM: each APOD holds its
+// compressed image, and the box has 512MB. Evicted days come back from the
+// disk cache without another download.
+const daysInMemory = 4
+
+// ponytail: FIFO eviction, not LRU. Swap if browsing patterns make it matter.
+var days = struct {
+	sync.Mutex
+	byDate map[string]*APOD
+	order  []string
+}{byDate: map[string]*APOD{}}
+
+// ByDate resolves the APOD posted on a given day. Past days never change, so
+// each is fetched once and reused, which is what makes stepping back and forth
+// through history instant.
+func ByDate(t time.Time) (*APOD, error) {
+	key := t.Format(time.DateOnly)
+
+	days.Lock()
+	a, ok := days.byDate[key]
+	days.Unlock()
+	if ok {
+		return a, nil
+	}
+
+	img, err := nasa.ApodImage(t) // ponytail: concurrent misses fetch twice, then agree
+	if err != nil {
+		return nil, redactAPIKey(err)
+	}
+
+	days.Lock()
+	defer days.Unlock()
+	if existing, ok := days.byDate[key]; ok {
+		return existing, nil // lost the race; one instance per day
+	}
+	a = newAPOD(img)
+	days.byDate[key] = a
+	days.order = append(days.order, key)
+	for len(days.order) > daysInMemory {
+		delete(days.byDate, days.order[0])
+		days.order = days.order[1:]
+	}
+	return a, nil
 }
 
 type apod struct {
@@ -119,9 +171,90 @@ var errNotAnImage = errors.New("not an image")
 
 // getImageBytes resolves nil bytes for an APOD that has no image, and an error
 // only when the fetch itself failed and is worth another try.
+// cacheDir holds compressed source images between restarts. systemd hands us
+// StateDirectory; otherwise the user cache dir. Empty disables the cache, and
+// every use is best-effort: a cache miss is only ever slower, never wrong.
+// ponytail: never pruned. One image per day browsed, so add a sweep if the
+// disk ever complains.
+var cacheDir = imageCacheDir()
+
+func imageCacheDir() string {
+	dir, _, _ := strings.Cut(os.Getenv("STATE_DIRECTORY"), ":") // systemd may list several
+	if dir == "" {
+		d, err := os.UserCacheDir()
+		if err != nil {
+			slog.Warn("no image cache on disk", "error", err)
+			return ""
+		}
+		dir = filepath.Join(d, "airlock.space")
+	}
+	dir = filepath.Join(dir, "images")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		slog.Warn("no image cache on disk", "error", err)
+		return ""
+	}
+	return dir
+}
+
+var dateRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// cachePath is the on-disk image for this APOD, or "" when it cannot be
+// cached. The date is NASA's, so it is checked before it becomes a path.
+func (a *APOD) cachePath() string {
+	if cacheDir == "" || !dateRegexp.MatchString(a.Date) {
+		return ""
+	}
+	return filepath.Join(cacheDir, a.Date+".img")
+}
+
+// cachedImage returns the stored image, if any. A zero-length file records a
+// day that has no image at all, which is worth remembering too.
+func (a *APOD) cachedImage() ([]byte, bool) {
+	path := a.cachePath()
+	if path == "" {
+		return nil, false
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	if len(body) == 0 {
+		return nil, true
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		os.Remove(path) // truncated or corrupt; fetch it again
+		return nil, false
+	}
+	a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
+	return body, true
+}
+
+func (a *APOD) storeImage(body []byte) {
+	path := a.cachePath()
+	if path == "" {
+		return
+	}
+	// write then rename, so a crash cannot leave a half image behind
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		slog.Warn("could not cache image", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		slog.Warn("could not cache image", "error", err)
+		os.Remove(tmp)
+	}
+}
+
 func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
+	if body, ok := a.cachedImage(); ok {
+		return body, nil
+	}
+
 	urls := a.imageURLs()
 	if len(urls) == 0 {
+		a.storeImage(nil)
 		return nil, nil
 	}
 
@@ -138,9 +271,11 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 			continue
 		}
 		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
+		a.storeImage(body)
 		return body, nil
 	}
 	if errors.Is(lastErr, errNotAnImage) {
+		a.storeImage(nil)
 		return nil, nil
 	}
 	return nil, lastErr
