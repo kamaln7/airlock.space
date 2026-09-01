@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/peteretelej/nasa"
 )
@@ -571,6 +572,107 @@ func TestFullscreenHelpKeys(t *testing.T) {
 		if k.Help().Key == "p" {
 			t.Error("offered the photo toggle to a client that cannot draw one")
 		}
+	}
+}
+
+// the terminal's own answer about its cell size outranks what ssh reports.
+// They disagree whenever the terminal adjusts its cell without adjusting the
+// window it reports - ghostty's adjust-cell-height does exactly that - and a
+// wrong ratio fits the picture to the wrong shape.
+func TestCellAspectPrefersTheTerminalsAnswer(t *testing.T) {
+	m := &Model{Width: 100, Height: 40}
+	if got := m.cellAspect(); got != defaultCellAspect {
+		t.Errorf("cellAspect() = %v with nothing to go on; want %v", got, defaultCellAspect)
+	}
+
+	// ssh says the window is 800x800, so cells look like 8x20
+	m.WidthPixels, m.HeightPixels = 800, 800
+	if got := m.cellAspect(); got != 2.5 {
+		t.Errorf("cellAspect() = %v from the ssh window; want 2.5", got)
+	}
+
+	// but the terminal itself draws 8x26 cells
+	m.Update(uv.CellSizeEvent{Width: 8, Height: 26})
+	if got := m.cellAspect(); got != 26.0/8.0 {
+		t.Errorf("cellAspect() = %v; want the terminal's own %v", got, 26.0/8.0)
+	}
+}
+
+// learning the real cell size mid-session has to redraw the placement: the one
+// already on screen was built to the wrong shape
+func TestCellSizeAnswerRedrawsThePlacement(t *testing.T) {
+	var out strings.Builder
+	m := besideImage(t, 150, 40)
+	m.Session = &out
+	m.baseView()
+	first := out.String()
+	if !strings.Contains(first, "a=p") {
+		t.Fatal("no placement on the first draw")
+	}
+	out.Reset()
+
+	m.baseView() // unchanged: the placement is not re-sent for nothing
+	if strings.Contains(out.String(), "a=p") {
+		t.Error("re-sent an unchanged placement")
+	}
+
+	m.Update(uv.CellSizeEvent{Width: 8, Height: 26})
+	out.Reset()
+	m.baseView()
+	if !strings.Contains(out.String(), "a=p") {
+		t.Error("kept a placement built for the wrong cell size")
+	}
+}
+
+// a tall picture in fullscreen leaves a margin either side; the keys go down
+// it, one to a row, and must still be recognised and clickable there
+func TestFullscreenStacksHelpBesideATallPicture(t *testing.T) {
+	m := besideImage(t, 120, 28)
+	m.State = StateFullscreen
+
+	lines := strings.Split(m.baseView(), "\n")
+	rows := map[string]int{}
+	for i, l := range lines {
+		s := ansi.Strip(l)
+		for _, k := range m.helpKeys() {
+			h := k.Help()
+			if strings.Contains(s, h.Key+" "+h.Desc) {
+				rows[h.Key] = i
+			}
+		}
+	}
+	if len(rows) < 3 {
+		t.Fatalf("only %d help items on screen: %v", len(rows), rows)
+	}
+	seen := map[int]bool{}
+	for k, r := range rows {
+		if seen[r] {
+			t.Errorf("%q shares row %d; stacked help is one item to a row", k, r)
+		}
+		seen[r] = true
+	}
+
+	// the two-item rule cannot see a lone item, so hit-testing has to know
+	row := rows["q"]
+	line := ansi.Strip(lines[row])
+	if !m.isHelpLine(line) {
+		t.Fatalf("row %d is not recognised as help: %q", row, strings.TrimSpace(line))
+	}
+	start, end, _ := columnSpan(line, "q quit")
+	if got, _ := m.hitTest((start+end)/2, row); got != "q" {
+		t.Errorf("hitTest on the stacked quit item = %q", got)
+	}
+}
+
+// the scroll hint has to be right on the frame it appears, not one behind
+func TestScrollHintIsNotAFrameLate(t *testing.T) {
+	m := besideImage(t, 130, 24) // long explanation, short terminal
+	first := ansi.Strip(m.baseView())
+	if !m.scrolls() {
+		t.Fatal("fixture does not scroll")
+	}
+	if !strings.Contains(first, "scroll") {
+		t.Error("the first frame offers no scroll hint for a scrolling explanation")
 	}
 }
 

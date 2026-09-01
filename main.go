@@ -17,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/samber/lo"
@@ -82,6 +83,10 @@ type Model struct {
 	Profile colorprofile.Profile
 	isLight bool
 
+	// cellW and cellH are the terminal's own cell size in pixels, which it
+	// reports when asked. Zero until it answers, or forever if it will not.
+	cellW, cellH int
+
 	State          State
 	apod           *apod.APOD
 	date           time.Time // the day being browsed; zero until the first load
@@ -135,7 +140,7 @@ func (m *Model) spinnerView() string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor)
+	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor, requestCellSize)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -147,7 +152,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = msg.Height
 		m.Width = msg.Width
 		m.applyArtDefault()
-		cmds = append(cmds, m.sendKitty())
+		// a resize can mean a new font size, and so a new cell
+		cmds = append(cmds, m.sendKitty(), requestCellSize)
+	case uv.CellSizeEvent:
+		if msg.Width > 0 && msg.Height > 0 {
+			// no need to drop the placement: a new cell shape fits the picture
+			// to a different box, and imageArea re-sends on any change of size
+			m.cellW, m.cellH = msg.Width, msg.Height
+		}
 	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
@@ -350,14 +362,29 @@ func (m *Model) loadImage() tea.Cmd {
 // defaultCellAspect is the usual terminal cell: twice as tall as it is wide.
 const defaultCellAspect = 2
 
+// requestCellSize asks the terminal how big one of its cells is. Sent through
+// bubbletea so it lands in order with the frames, and answered - by terminals
+// that implement it - with a CellSizeEvent.
+func requestCellSize() tea.Msg {
+	return tea.RawMsg{Msg: ansi.WindowOp(ansi.RequestCellSizeWinOp)}
+}
+
 // cellAspect is how many times taller this client's cells are than they are
-// wide. ssh reports the drawable size in pixels beside the cell grid, so where
-// the client sends it the real shape is known rather than assumed.
+// wide, which is what turns image pixels into rows and columns.
+//
+// Three sources, worst last. The terminal's own answer is the only one that
+// knows about its cell metrics: ghostty's adjust-cell-height, say, makes cells
+// taller without changing the window, and a terminal that reports its pixel
+// size before applying that adjustment leaves the ssh numbers describing a
+// cell it does not actually draw. Get that ratio wrong and the picture is
+// fitted to the wrong shape - a margin the terminal, not we, put there.
 func (m *Model) cellAspect() float64 {
+	if m.cellW > 0 && m.cellH > 0 {
+		return float64(m.cellH) / float64(m.cellW)
+	}
 	if m.WidthPixels > 0 && m.HeightPixels > 0 && m.Width > 0 && m.Height > 0 {
-		cellW := float64(m.WidthPixels) / float64(m.Width)
-		cellH := float64(m.HeightPixels) / float64(m.Height)
-		return cellH / cellW
+		return (float64(m.HeightPixels) / float64(m.Height)) /
+			(float64(m.WidthPixels) / float64(m.Width))
 	}
 	return defaultCellAspect
 }
@@ -365,6 +392,9 @@ func (m *Model) cellAspect() float64 {
 func (m *Model) pixelBox() (w, h int) {
 	if m.WidthPixels > 0 && m.HeightPixels > 0 {
 		return m.WidthPixels, m.HeightPixels
+	}
+	if m.cellW > 0 && m.cellH > 0 {
+		return m.Width * m.cellW, m.Height * m.cellH
 	}
 	return m.Width * 10, m.Height * 20
 }
@@ -562,6 +592,12 @@ func (m *Model) viewAPOD() string {
 			m.imagePane(contentW, imgH), "", txt.MarginLeft(col).Render(text))
 	}
 
+	// rendered again now the body has been built: whether the explanation
+	// scrolls is only known once the viewport has its content, and the first
+	// frame of a day would otherwise offer no scroll hint. Its line count does
+	// not change, so the rows budgeted above still hold.
+	helpView = m.viewHelp()
+
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		m.viewAPODText(contentW),
 		// the body holds the rows it was given whether or not it fills them,
@@ -593,18 +629,20 @@ func (m *Model) imagePane(w, h int) string {
 // viewLinkLine is the clickable URL shown under the explanation, with inline
 // copy feedback. Same row either way, so the layout doesn't jump.
 func (m *Model) viewLinkLine() string {
+	// the feedback replaces the URL rather than sitting under it: one row
+	// either way, so nothing shifts, and no row is reserved for a hint that
+	// is almost never showing
+	if m.copiedRecently {
+		return m.txtYellow().Bold(true).Render("link copied!")
+	}
 	link := m.apod.Link()
 	st := m.txtMuted()
 	if m.hoverLink {
 		st = m.txtYellow().Underline(true)
 	}
-	hint := "" // its own row, so the URL never shifts when this appears
-	if m.copiedRecently {
-		hint = txt.Bold(true).Render("copied!")
-	}
 	// hyperlink outside the style, never inside: lipgloss styles rune by rune
 	// under Underline, which shreds an embedded escape into literal text
-	return hyperlink(link, st.Render(link)) + "\n" + hint
+	return hyperlink(link, st.Render(link))
 }
 
 type msgCopyExpired struct{}
@@ -668,21 +706,32 @@ func (m *Model) photoKey() []key.Binding {
 // viewHelp renders the help bar. Items under the mouse are highlighted; Update
 // hit-tests clicks against the same "key desc" spans.
 func (m *Model) viewHelp() string {
-	var b strings.Builder
-	for i, k := range m.helpKeys() {
-		if i > 0 {
-			b.WriteString(m.divDot().Render())
-		}
-		h := k.Help()
-		keySt := txt.Bold(true)
-		descSt := m.txtMuted()
-		if m.hoverKey == h.Key {
-			keySt = keySt.Foreground(colorYellow).Underline(true)
-			descSt = m.txtYellow()
-		}
-		b.WriteString(keySt.Render(h.Key) + " " + descSt.Render(h.Desc))
+	var items []string
+	for _, k := range m.helpKeys() {
+		items = append(items, m.helpItem(k))
 	}
-	return txt.MarginTop(1).Render(b.String())
+	return txt.MarginTop(1).Render(strings.Join(items, m.divDot().Render()))
+}
+
+// helpItem renders one keybinding, lit up when the mouse is on it.
+func (m *Model) helpItem(k key.Binding) string {
+	h := k.Help()
+	keySt, descSt := txt.Bold(true), m.txtMuted()
+	if m.hoverKey == h.Key {
+		keySt = keySt.Foreground(colorYellow).Underline(true)
+		descSt = m.txtYellow()
+	}
+	return keySt.Render(h.Key) + " " + descSt.Render(h.Desc)
+}
+
+// viewHelpStacked is the same bar running down instead of across, for the
+// margin beside a tall picture in fullscreen.
+func (m *Model) viewHelpStacked() string {
+	var rows []string
+	for _, k := range m.helpKeys() {
+		rows = append(rows, m.helpItem(k))
+	}
+	return strings.Join(rows, "\n")
 }
 
 type point struct{ X, Y int }
@@ -821,6 +870,12 @@ func (m *Model) isHelpLine(line string) bool {
 		if strings.Contains(line, h.Key+" "+h.Desc) {
 			matches++
 		}
+	}
+	// two items is the rule where explanation text shares the frame and could
+	// otherwise be mistaken for the bar. Stacked down a fullscreen margin a
+	// row carries one item - and the only text on that frame is the bar.
+	if m.State == StateFullscreen {
+		return matches >= 1
 	}
 	return matches >= 2
 }
@@ -1222,13 +1277,28 @@ func (m *Model) viewFullscreen() string {
 	if !m.imageOK {
 		return m.viewAPOD()
 	}
-	helpView := strings.TrimSpace(m.viewHelp())
 
-	// image gets all but the last row; help gets its own line instead of
-	// being byte-spliced into an ANSI-heavy image line
+	// a tall picture leaves a margin either side of itself; the keys go down
+	// the left of it rather than stealing a row from the bottom
+	imgW, imgH := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y,
+		m.Width, m.Height, m.cellAspect())
+	stacked := m.viewHelpStacked()
+	if side := (m.Width - imgW) / 2; side >= lipgloss.Width(stacked)+2 {
+		gutter := txt.Width(side).Height(imgH).AlignVertical(lipgloss.Center)
+		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center,
+			lipgloss.JoinHorizontal(lipgloss.Top,
+				gutter.Align(lipgloss.Center).Render(stacked),
+				txt.Width(imgW).Render(m.imageArea(imgW, imgH)),
+				gutter.Render(""),
+			))
+	}
+
+	// otherwise the picture takes all but the last row and the keys sit
+	// centered beneath it, on a line of their own rather than spliced into an
+	// ANSI-heavy image row
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.Place(m.Width, m.Height-1, lipgloss.Center, lipgloss.Center,
 			m.imageArea(m.Width, m.Height-1)),
-		helpView,
+		txt.Width(m.Width).Align(lipgloss.Center).Render(strings.TrimSpace(m.viewHelp())),
 	)
 }
