@@ -82,35 +82,34 @@ type Model struct {
 	Profile colorprofile.Profile
 	isLight bool
 
-	State            State
-	imgOrExplanation bool // true -> img, false -> explanation
-	apod             *apod.APOD
-	date             time.Time // the day being browsed; zero until the first load
-	latest           time.Time // the most recent day NASA has posted
-	imageOK          bool      // image bytes are ready to render
-	kittyReady       bool      // this day's photo is uploaded and placeable
-	preferArt        bool      // sextant art instead of the real photo
-	photoToggled     bool      // user overrode the art/photo default with the keybind
-	copiedRecently   bool
-	hoverKey         string // help bar item under the mouse
-	hoverLink        bool   // mouse is over the URL under the explanation
-	mouseX           int    // last seen mouse position
-	mouseY           int
-	selAnchor        point // in-app text selection (mouse tracking eats the
-	selEnd           point // terminal's own selection, so we provide our own)
-	selActive        bool
-	selPending       bool   // left button went down inside the selectable region
-	artKey           string // memoized decorative art (stable across renders)
-	art              string
-	explCache        string // memoized processed explanation
-	explCacheFor     *apod.APOD
-	vp               viewport.Model // the scrolling explanation
-	vpFor            *apod.APOD     // the day its content was set from
-	vpWidth          int
-	placedCols       int // current kitty virtual placement size
-	placedRows       int
-	imageLoading     bool
-	spinFrame        int
+	State          State
+	apod           *apod.APOD
+	date           time.Time // the day being browsed; zero until the first load
+	latest         time.Time // the most recent day NASA has posted
+	imageOK        bool      // image bytes are ready to render
+	kittyReady     bool      // this day's photo is uploaded and placeable
+	preferArt      bool      // sextant art instead of the real photo
+	photoToggled   bool      // user overrode the art/photo default with the keybind
+	copiedRecently bool
+	hoverKey       string // help bar item under the mouse
+	hoverLink      bool   // mouse is over the URL under the explanation
+	mouseX         int    // last seen mouse position
+	mouseY         int
+	selAnchor      point // in-app text selection (mouse tracking eats the
+	selEnd         point // terminal's own selection, so we provide our own)
+	selActive      bool
+	selPending     bool // left button went down inside the selectable region
+	explCol        int  // where the explanation block landed, for selection
+	explWidth      int
+	explCache      string // memoized processed explanation
+	explCacheFor   *apod.APOD
+	vp             viewport.Model // the scrolling explanation
+	vpFor          *apod.APOD     // the day its content was set from
+	vpWidth        int
+	placedCols     int // current kitty virtual placement size
+	placedRows     int
+	imageLoading   bool
+	spinFrame      int
 }
 
 type State int
@@ -131,19 +130,11 @@ func spinTick() tea.Cmd {
 	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
 }
 
-// showingImage reports whether the image (or its spinner) is what the APOD
-// view is displaying. On a video day there is no image, so it is always the
-// explanation regardless of the toggle.
-func (m *Model) showingImage() bool {
-	return m.imgOrExplanation && (m.imageOK || m.imageLoading)
-}
-
 func (m *Model) spinnerView() string {
 	return m.txtYellow().Render(spinnerFrames[m.spinFrame%len(spinnerFrames)])
 }
 
 func (m *Model) Init() tea.Cmd {
-	m.imgOrExplanation = true
 	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor)
 }
 
@@ -165,18 +156,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.showDay(m.date.AddDate(0, 0, -1)))
 		case key.Matches(msg, keyNextDay):
 			cmds = append(cmds, m.showDay(m.date.AddDate(0, 0, 1)))
-		case key.Matches(msg, keyExplanation):
-			// nothing to toggle to on a video day: the explanation is all there is
-			if !m.imageOK && !m.imageLoading {
-				break
-			}
-			m.State = StateAPOD
-			m.imgOrExplanation = !m.imgOrExplanation
-			m.artKey = "" // reshuffle the decorative art, as before, on interaction
 		case key.Matches(msg, keyFullscreen):
-			// no fullscreen from the explanation view
-			if !m.imageOK || !m.imgOrExplanation {
-				break
+			if !m.imageOK {
+				break // nothing to make big on a video day
 			}
 			if m.State == StateFullscreen {
 				m.State = StateAPOD
@@ -323,7 +305,6 @@ func (m *Model) showDay(date time.Time) tea.Cmd {
 	}
 	m.date = date
 	m.State = StateLoading
-	m.artKey = "" // reshuffle the decorative art, as on any other interaction
 	return m.loadAPOD(date)
 }
 
@@ -434,10 +415,6 @@ var (
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
 	)
-	keyExplanation = key.NewBinding(
-		key.WithKeys("e", "ctrl+e"),
-		key.WithHelp("e", "explanation/image"),
-	)
 	keyFullscreen = key.NewBinding(
 		key.WithKeys("f", "ctrl+f"),
 		key.WithHelp("f", "fullscreen"),
@@ -492,59 +469,120 @@ func (m *Model) baseView() string {
 	return "error"
 }
 
+// the reading box. 72 columns is the measure the text column has always used;
+// the height cap keeps a maximised terminal from stretching the explanation
+// into one enormous column, and sits above the longest explanation NASA
+// posts, so it rarely bites. The picture gets a column of its own the same
+// width at most, so neither crowds the other on a very wide screen.
+const (
+	explMaxWidth  = 72
+	explMaxHeight = 24
+	imageMaxWidth = 72
+	imageMinWidth = 24 // narrower than this and a picture is not worth the room
+	paneGap       = 4
+	wideAspect    = 1.4 // past this a picture wants the width a text column wants
+)
+
+// imageIsWide reports whether the picture would rather have the full width
+// than a column beside the text.
+func (m *Model) imageIsWide() bool {
+	sz := m.apod.ImageSize
+	return sz.Y > 0 && float64(sz.X)/float64(sz.Y) > wideAspect
+}
+
+// explBlock renders the scrolling explanation and records where it landed.
+// The selection helpers read those columns rather than guessing at them, which
+// is what lets the text be selectable wherever the layout puts it.
+func (m *Model) explBlock(width, maxHeight, col int) string {
+	m.explCol, m.explWidth = col, max(0, width-scrollWidth)
+	return m.viewExplanation(width, maxHeight)
+}
+
+// viewAPOD is the main view: the day's picture and its explanation together.
+// Tall and square pictures take a column beside the text; wide ones sit above
+// it, since a panorama and a column of text both want the same width.
 func (m *Model) viewAPOD() string {
-	showImage := m.showingImage()
-	totalWidth := m.Width - 2 // -2 for the margin
-	apodWidth := min(72, totalWidth)
-	freeWidth := totalWidth - apodWidth
-	if showImage {
-		// full-width apod if we are showing the image
-		apodWidth = totalWidth
-		freeWidth = totalWidth
-	}
-	apodView := m.viewAPODText(apodWidth)
+	avail := m.Width - 2 // side margins
 	helpView := m.viewHelp()
+	linkBlock := m.viewLinkLine()
 
-	freeHeight := m.Height - 2 - countLines(helpView) // -2 for top margin + last row
-	if showImage {
-		freeHeight -= countLines(apodView)
-		var imgBlock string
-		if m.imageOK {
-			imgBlock = txt.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(m.imageArea(freeWidth, freeHeight))
-		} else {
-			// pin the spinner to the exact screen center (same row as viewLoading)
-			pad := max(0, m.Height/2-1-countLines(apodView))
-			imgBlock = txt.Width(freeWidth).Height(freeHeight).Render(
-				strings.Repeat("\n", pad) + txt.Width(freeWidth).Align(lipgloss.Center).Render(m.loadingLine()),
-			)
-		}
-		return txt.Margin(1, 1, 0, 1).Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				apodView,
-				imgBlock,
-				helpView,
-			),
-		)
-	} else {
-		asciiArt := m.decorArt(max(0, freeWidth-8), freeHeight) // -8 for the gap
+	textW := min(explMaxWidth, avail)
+	room := min(imageMaxWidth, avail-textW-paneGap)
 
-		// the explanation gets whatever height the fixed furniture leaves it
-		linkBlock := m.viewLinkLine()
-		chrome := countLines(apodView) + countLines(linkBlock) + countLines(helpView)
-		explBlock := m.viewExplanation(apodWidth, max(1, m.Height-chrome-2))
-
-		// max-width container centered in the viewport (margin: 0 auto):
-		// text column and art side by side at their natural widths
-		textCol := apodView + explBlock + "\n\n" + linkBlock + "\n" + helpView
-		content := textCol
-		if asciiArt != "" {
-			content = lipgloss.JoinHorizontal(lipgloss.Top,
-				textCol,
-				txt.MarginLeft(8).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
-			)
-		}
-		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
+	// how many rows the body has, measured against the widest the content
+	// could be. Wide enough for a picture beside the text, the header is a
+	// fixed five rows, so this does not shift under the layout it decides.
+	probeW := textW
+	if room >= imageMinWidth {
+		probeW = textW + paneGap + room
 	}
+	chrome := countLines(m.viewAPODText(probeW)) + countLines(linkBlock) + countLines(helpView) + 2
+	bodyH := max(3, m.Height-chrome)
+
+	// the picture's column is sized to the picture, not the other way round: a
+	// tall one is bound by the rows available and would otherwise sit in the
+	// middle of a column twice its width
+	imgW := room
+	if m.imageOK {
+		imgW, _ = fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, room, bodyH, m.cellAspect())
+	}
+	beside := room >= imageMinWidth && imgW >= imageMinWidth && !(m.imageOK && m.imageIsWide())
+	if m.imageLoading {
+		// hold the column open so the page does not jump when it arrives
+		beside, imgW = room >= imageMinWidth, room
+	}
+	hasImage := m.imageOK || m.imageLoading
+
+	contentW := textW
+	switch {
+	case beside:
+		contentW = textW + paneGap + imgW
+	case hasImage:
+		contentW = min(avail, explMaxWidth+paneGap+imageMaxWidth)
+	}
+
+	var body string
+	switch {
+	case !hasImage:
+		body = m.explBlock(textW, min(bodyH, explMaxHeight), (contentW-textW)/2)
+	case beside:
+		text := m.explBlock(textW, min(bodyH, explMaxHeight), imgW+paneGap)
+		body = lipgloss.JoinHorizontal(lipgloss.Top,
+			m.imagePane(imgW, max(bodyH, lipgloss.Height(text))),
+			strings.Repeat(" ", paneGap),
+			text)
+	default:
+		// a wide picture over the text, each with a share of the rows. The
+		// text is narrower than the picture, so it has to be indented to the
+		// column explBlock records - beside a picture the join does that.
+		imgH := max(3, min(bodyH/2, bodyH-6))
+		col := (contentW - textW) / 2
+		text := m.explBlock(textW, min(bodyH-imgH-1, explMaxHeight), col)
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			m.imagePane(contentW, imgH), "", txt.MarginLeft(col).Render(text))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		m.viewAPODText(contentW),
+		txt.Width(contentW).Render(body),
+		"",
+		txt.Width(contentW).Align(lipgloss.Center).Render(linkBlock),
+		txt.Width(contentW).Align(lipgloss.Center).Render(helpView),
+	)
+	// Place centers every line, so the explanation's own columns shift by the
+	// same margin the content box does
+	m.explCol += (m.Width - contentW) / 2
+	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
+}
+
+// imagePane is the picture centered in a box of cells, or the spinner while
+// there is not one yet.
+func (m *Model) imagePane(w, h int) string {
+	box := txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center)
+	if !m.imageOK {
+		return box.Render(m.loadingLine())
+	}
+	return box.Render(m.imageArea(w, h))
 }
 
 // viewLinkLine is the clickable URL shown under the explanation, with inline
@@ -596,18 +634,9 @@ func (m *Model) helpKeys() []key.Binding {
 	}
 	// the day arrows live in the header now, not here
 	var keys []key.Binding
-	// no image to toggle to on a video day, so no e
-	if m.imageOK || m.imageLoading {
-		// show only the action the key would perform, not both toggle sides
-		eDesc := "image"
-		if m.showingImage() {
-			eDesc = "explanation"
-		}
-		keys = append(keys, key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc)))
-	}
-	if m.showingImage() {
+	if m.imageOK {
 		keys = append(keys, keyFullscreen)
-		// image/ascii toggle only where the image is on screen; action-only label
+		// image/ascii toggle only where there is an image; action-only label
 		if m.KittyGraphics {
 			pDesc := "ascii"
 			if m.preferArt {
@@ -671,11 +700,11 @@ func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 		return s, e, true
 	}
 
-	// explanation view: text-column content matched against the actual
-	// title/explanation text, so gaps and decorations never highlight
-	if m.State == StateAPOD && !m.showingImage() {
-		colStart := 1
-		colEnd := min(1+min(72, m.Width-2), ansi.StringWidth(line))
+	// explanation rows, matched against the actual text so the picture beside
+	// them, the gaps and the scrollbar never highlight
+	if m.State == StateAPOD && m.explWidth > 0 {
+		colStart := m.explCol
+		colEnd := min(m.explCol+m.explWidth, ansi.StringWidth(line))
 		if colStart >= colEnd {
 			return 0, 0, false
 		}
@@ -866,7 +895,7 @@ func (m *Model) syncViewport(width, maxHeight int) {
 // explanationOnScreen reports whether the explanation is the thing being
 // read, which is what decides whether scroll input belongs to it.
 func (m *Model) explanationOnScreen() bool {
-	return m.State == StateAPOD && !m.showingImage()
+	return m.State == StateAPOD
 }
 
 // scrolls reports whether the explanation has more than fits on screen.
@@ -953,47 +982,50 @@ func countLines(str string) int {
 // Goodbye is printed on exit, outside the alt screen. It writes truecolor
 // escapes; the caller sends them through a colorprofile.Writer, which
 // downsamples them to what the client can show.
-func Goodbye() string {
+func Goodbye(width int) string {
+	if width <= 0 {
+		width = 80 // no size to hand: assume the classic terminal
+	}
 	muted := txt.Foreground(colorMuted.dark)
 	yellow := txt.Foreground(colorYellow)
 
 	msg := yellow.Render(" ♥ thanks for visiting! wishing you clear skies ~") + "\n\n"
+
+	// the art used to sit beside the explanation, in the space the picture now
+	// has. This is the one place left with room and nothing competing for it.
+	// Printed to the scrollback, where height costs nothing, so only width is
+	// a real limit - and every art has to fit some terminal, or the shuffle
+	// returns the same one every time.
+	art := randomArt(width-2, 40,
+		colorMuted.dark, colorCosmic.dark, colorStellar.dark, colorNebula.dark)
+	if art != "" {
+		art = "\n" + art + "\n"
+	}
+
 	// StaleOnError can return a usable stale APOD alongside an error
 	a, _ := apod.Today()
 	if a == nil {
-		return "\n" + msg
+		return "\n" + art + msg
 	}
-	return fmt.Sprintf("\n 🌌 %s %s\n 🔗 %s\n\n%s",
+	return fmt.Sprintf("\n%s\n 🌌 %s %s\n 🔗 %s\n\n%s",
+		art,
 		txt.Bold(true).Render(a.Title),
 		muted.Render("— "+a.ApodDate.Format(time.DateOnly)),
 		yellow.Render(a.Link()),
 		msg)
 }
 
-// decorArt picks and colorizes a random ascii art fitting the box, memoized so
-// it stays put across renders (mouse motion re-renders constantly) and only
-// reshuffles when the box size changes.
-func (m *Model) decorArt(freeWidth, freeHeight int) string {
-	key := fmt.Sprintf("%dx%d", freeWidth, freeHeight)
-	if m.artKey == key {
-		return m.art
-	}
-
-	var asciiArt string
-	allAsciiArt := slices.Clone(ASCIIAll)
-	lom.Shuffle(allAsciiArt)
-	for _, art := range allAsciiArt {
-		if countLines(art) > freeHeight {
-			continue
+// randomArt picks an ascii art that fits a box of cells, colorized. Nothing
+// memoizes it any more: it is drawn once, on the way out.
+func randomArt(maxWidth, maxHeight int, colors ...color.Color) string {
+	all := slices.Clone(ASCIIAll)
+	lom.Shuffle(all)
+	for _, art := range all {
+		if countLines(art) <= maxHeight && lipgloss.Width(art) <= maxWidth {
+			return colorize(art, colors...)
 		}
-		if lipgloss.Width(art) > freeWidth {
-			continue
-		}
-		asciiArt = colorize(art, m.color(colorMuted), m.color(colorCosmic), m.color(colorStellar), m.color(colorNebula))
-		break
 	}
-	m.artKey, m.art = key, asciiArt
-	return asciiArt
+	return ""
 }
 
 // applyArtDefault picks art vs real photo until the user toggles explicitly:

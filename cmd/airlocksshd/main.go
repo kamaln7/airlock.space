@@ -48,7 +48,11 @@ func main() {
 					// the goodbye is written raw, past the program: downsample
 					// its colors to what this client can actually show
 					w := colorprofile.Writer{Forward: s, Profile: sessionProfile(s)}
-					w.WriteString(airlockspace.Goodbye())
+					cols := 0
+					if pty, _, ok := s.Pty(); ok {
+						cols = pty.Window.Width
+					}
+					w.WriteString(airlockspace.Goodbye(cols))
 				}
 			},
 			// middleware runs in reverse order, so activeterm goes last here to

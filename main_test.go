@@ -34,24 +34,24 @@ func TestFitImage(t *testing.T) {
 	}
 }
 
-// on a video day (no image) e must not toggle into a view that can't exist,
-// and the footer must not offer it
-func TestVideoDayNoImageToggle(t *testing.T) {
-	m := &Model{apod: &apod.APOD{Image: &nasa.Image{}}}
+// a video day has no picture, so nothing may offer to enlarge one
+func TestVideoDayOffersNoImageKeys(t *testing.T) {
+	m := &Model{Width: 100, Height: 40, apod: &apod.APOD{Image: &nasa.Image{}}}
 	m.Init()
 	m.Update(imageMsg{ok: false})
-	before := m.imgOrExplanation
-	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
-	if m.imgOrExplanation != before {
-		t.Error("e toggled with no image to toggle to")
-	}
-	if m.showingImage() {
-		t.Error("showingImage with no image")
-	}
+
 	for _, k := range m.helpKeys() {
-		if h := k.Help(); h.Key == "e" || h.Key == "f" {
+		if h := k.Help(); h.Key == "f" || h.Key == "p" {
 			t.Errorf("footer offers %q with no image", h.Key)
 		}
+	}
+	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if m.State == StateFullscreen {
+		t.Error("went fullscreen with no image to show")
+	}
+	// the explanation still gets the whole reading box
+	if got := countLines(m.baseView()); got > m.Height {
+		t.Errorf("frame is %d lines on a %d-row terminal", got, m.Height)
 	}
 }
 
@@ -343,6 +343,135 @@ func TestCellAspect(t *testing.T) {
 	}
 }
 
+// besideImage is a model showing a tall picture next to the explanation, with
+// the kitty path standing in so no decoding is needed.
+func besideImage(t *testing.T, w, h int) *Model {
+	t.Helper()
+	m := testModel(t, day(2026, 8, 20))
+	m.Width, m.Height = w, h
+	// long enough that the reading box, not the text, decides the height
+	m.apod.Explanation = strings.Repeat("Some words about deep space and distant galaxies. ", 60)
+	m.apod.ImageSize = image.Point{X: 1059, Y: 1641}
+	m.Session, m.KittyGraphics = io.Discard, true
+	m.imageOK, m.kittyReady = true, true
+	return m
+}
+
+// the picture and the text share rows now, so selection can no longer assume
+// the text starts at the left edge: it has to know which columns are the
+// explanation's, or dragging over it copies the picture beside it.
+func TestExplanationSelectableBesideTheImage(t *testing.T) {
+	t.Run("beside", func(t *testing.T) { explSelectable(t, besideImage(t, 150, 34)) })
+	t.Run("stacked under a wide picture", func(t *testing.T) {
+		m := besideImage(t, 150, 34)
+		m.apod.ImageSize = image.Point{X: 3000, Y: 900}
+		explSelectable(t, m)
+	})
+}
+
+func explSelectable(t *testing.T, m *Model) {
+	t.Helper()
+	lines := strings.Split(m.baseView(), "\n")
+	if m.explWidth == 0 {
+		t.Fatal("no explanation block recorded")
+	}
+
+	// the recorded column has to be where the text actually is, not merely
+	// consistent with itself: a block that forgets to indent agrees with a
+	// column of zero and still renders in the wrong place
+	for _, l := range lines {
+		stripped := ansi.Strip(l)
+		i := strings.Index(stripped, "Some words about")
+		if i < 0 {
+			continue
+		}
+		if got := ansi.StringWidth(stripped[:i]); got != m.explCol {
+			t.Fatalf("explanation text starts at column %d; explCol says %d", got, m.explCol)
+		}
+		break
+	}
+
+	var found int
+	for _, l := range lines {
+		stripped := ansi.Strip(l)
+		x1, x2, ok := m.copyableSpan(stripped)
+		if !ok {
+			continue
+		}
+		if strings.Contains(stripped, m.apod.Title) {
+			continue // the title row is selectable on its own terms
+		}
+		found++
+		if x1 < m.explCol || x2 > m.explCol+m.explWidth {
+			t.Errorf("span %d-%d strays outside the explanation columns %d-%d",
+				x1, x2, m.explCol, m.explWidth+m.explCol)
+		}
+		text := strings.TrimSpace(ansi.Cut(stripped, x1, x2))
+		if !strings.Contains(m.explanationText(), text) {
+			t.Errorf("selected %q, which is not explanation text", text)
+		}
+	}
+	if found == 0 {
+		t.Error("no explanation row is selectable beside the picture")
+	}
+}
+
+// whatever the terminal and whatever the picture's shape, the page has to fit
+func TestMergedLayoutFits(t *testing.T) {
+	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 1280, Y: 1280}, {X: 3000, Y: 900}} {
+		for _, w := range []int{60, 80, 100, 130, 200} {
+			for _, h := range []int{20, 24, 34, 60} {
+				m := besideImage(t, w, h)
+				m.apod.ImageSize = sz
+				if got := countLines(m.baseView()); got > h {
+					t.Errorf("%v at %dx%d: frame is %d rows", sz, w, h, got)
+				}
+			}
+		}
+	}
+}
+
+// every art has to be reachable, or the shuffle always lands on the same one
+func TestGoodbyeArtIsActuallyVaried(t *testing.T) {
+	seen := map[string]bool{}
+	for range 60 {
+		seen[randomArt(78, 40, colorMuted.dark)] = true
+	}
+	if len(seen) < len(ASCIIAll) {
+		t.Errorf("only %d of %d arts ever drawn at 78 columns", len(seen), len(ASCIIAll))
+	}
+	// a narrow terminal still gets something, and it fits
+	art := randomArt(34, 40, colorMuted.dark)
+	if art == "" {
+		t.Fatal("no art fits 34 columns")
+	}
+	if w := lipgloss.Width(art); w > 34 {
+		t.Errorf("art is %d wide in a 34 column box", w)
+	}
+}
+
+// the goodbye is the art's home now; it has to actually be in there
+func TestGoodbyeCarriesArt(t *testing.T) {
+	out := ansi.Strip(Goodbye(100))
+	if !strings.Contains(out, "thanks for visiting") {
+		t.Fatal("no farewell in the goodbye")
+	}
+	art := randomArt(98, 40, colorMuted.dark)
+	if art == "" {
+		t.Fatal("no art fits, so the check below proves nothing")
+	}
+	// every art is a block of drawing glyphs; the goodbye's other lines are not
+	rows := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.ContainsAny(l, "\u2800\u28ff\u2580\u2584\u2588\u259f\U0001fb00") {
+			rows++
+		}
+	}
+	if rows == 0 {
+		t.Errorf("no art rows in the goodbye:\n%s", out)
+	}
+}
+
 // a slow day that the user has already navigated away from must not land
 func TestStaleDayResponseIsDropped(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))
@@ -393,7 +522,7 @@ func TestPhotoIsOnlySentWhenItWillBeSeen(t *testing.T) {
 func TestPhotoToggleOfferedBeforeTheUpload(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))
 	m.KittyGraphics, m.Session, m.imageOK = true, io.Discard, true
-	m.imgOrExplanation, m.preferArt, m.kittyReady = true, true, false
+	m.preferArt, m.kittyReady = true, false
 
 	var keys string
 	for _, k := range m.helpKeys() {

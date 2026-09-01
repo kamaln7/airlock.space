@@ -40,5 +40,6 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye())
+	// the model kept the last size the terminal reported
+	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye(m.Width))
 }
