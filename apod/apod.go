@@ -111,10 +111,17 @@ func (a *APOD) imageURLs() []string {
 	return urls
 }
 
+// errNoImage marks a settled "this APOD has no image" (a video day), as
+// opposed to a transient fetch failure worth retrying.
+var errNoImage = errors.New("no image for this APOD")
+
+// getImageBytes resolves nil bytes, not an error, when the APOD simply has no
+// image: resolvable never caches errors, so an error here would make every new
+// session sit through the fetch and its retries again.
 func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 	urls := a.imageURLs()
 	if len(urls) == 0 {
-		return nil, fmt.Errorf("no image URL found")
+		return nil, nil
 	}
 
 	var lastErr error
@@ -131,6 +138,9 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 		}
 		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
 		return body, nil
+	}
+	if errors.Is(lastErr, errNoImage) {
+		return nil, nil
 	}
 	return nil, lastErr
 }
@@ -154,7 +164,7 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 	}
 	// video days serve an mp4/youtube page; don't download megabytes just to fail decoding
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
-		return nil, fmt.Errorf("not an image: content-type %q", ct)
+		return nil, fmt.Errorf("%w: content-type %q", errNoImage, ct)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -168,6 +178,9 @@ func (a *APOD) getPNGBytes(_ context.Context) ([]byte, error) {
 	byt, err := a.ImageBytes()
 	if err != nil {
 		return nil, err
+	}
+	if len(byt) == 0 {
+		return nil, errNoImage
 	}
 	if http.DetectContentType(byt) == "image/png" {
 		return byt, nil

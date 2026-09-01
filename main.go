@@ -249,7 +249,8 @@ func (m *Model) loadAPOD() tea.Cmd {
 func (m *Model) loadImage() tea.Cmd {
 	a := m.apod
 	return func() tea.Msg {
-		if _, err := a.ImageBytes(); err != nil {
+		byt, err := a.ImageBytes()
+		if err != nil || len(byt) == 0 {
 			slog.Warn("APOD has no image", "error", err)
 			return imageMsg{}
 		}
@@ -374,11 +375,11 @@ func (m *Model) viewLinkLine() string {
 	if m.hoverLink {
 		st = m.txtYellow().Underline(true)
 	}
-	line := st.Render(termenv.Hyperlink(link, link))
+	hint := "" // its own row, so the URL never shifts when this appears
 	if m.copiedRecently {
-		line += m.Style.Bold(true).Render("  copied!")
+		hint = m.Style.Bold(true).Render("copied!")
 	}
-	return line
+	return st.Render(termenv.Hyperlink(link, link)) + "\n" + hint
 }
 
 type msgCopyExpired struct{}
@@ -560,6 +561,9 @@ func columnSpan(line, substr string) (start, end int, ok bool) {
 // frameLine returns the ANSI-stripped screen row under y.
 func (m *Model) frameLine(y int) string {
 	lines := strings.Split(m.baseView(), "\n")
+	// a frame taller than the viewport scrolls: the screen shows its tail, so
+	// screen row y is that many lines further down the frame
+	y += max(0, len(lines)-m.Height)
 	if y < 0 || y >= len(lines) {
 		return ""
 	}

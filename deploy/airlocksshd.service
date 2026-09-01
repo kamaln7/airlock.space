@@ -13,6 +13,7 @@ Environment=SSH_HOST_KEY=/var/lib/airlocksshd/id_ed25519
 EnvironmentFile=/etc/airlocksshd.env
 Restart=always
 RestartSec=1s
-# 457MB box: a render can spike, so cap the service instead of OOMing the host
-MemoryHigh=192M
-MemoryMax=256M
+# the box is dedicated to this, so no hard MemoryMax: a kill mid-render is
+# worse than using the RAM. MemoryHigh only throttles/reclaims, leaving room
+# for sshd on the 457MB box
+MemoryHigh=350M
