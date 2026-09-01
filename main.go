@@ -379,7 +379,9 @@ func (m *Model) viewLinkLine() string {
 	if m.copiedRecently {
 		hint = m.Style.Bold(true).Render("copied!")
 	}
-	return st.Render(termenv.Hyperlink(link, link)) + "\n" + hint
+	// hyperlink outside the style, never inside: lipgloss styles rune by rune
+	// under Underline, which shreds an embedded escape into literal text
+	return termenv.Hyperlink(link, st.Render(link)) + "\n" + hint
 }
 
 type msgCopyExpired struct{}
@@ -743,7 +745,7 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 
 	dateLine := m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly))
-	title := txt.Bold(true).Render(termenv.Hyperlink(m.apod.Link(), m.apod.Title))
+	title := termenv.Hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
 
 	// center the title relative to the viewport, not the space next to the
 	// header; overlay works when the centered span clears the header

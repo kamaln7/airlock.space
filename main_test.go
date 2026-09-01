@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kamaln7/airlock.space/apod"
+	"github.com/muesli/termenv"
 	"github.com/peteretelej/nasa"
 )
 
@@ -76,4 +77,38 @@ func TestHitTestWhenFrameOverflows(t *testing.T) {
 	if _, ok := m.hitTest(40, frameRow); ok {
 		t.Error("link hit at the unscrolled frame row, which is off screen")
 	}
+}
+
+// lipgloss styles rune by rune under Underline, which shreds an escape
+// sequence embedded in the styled text: the hyperlink must wrap the styled
+// string, not the other way round. Only reproduces at a real color profile.
+func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
+	re := lipgloss.NewRenderer(nil)
+	re.SetColorProfile(termenv.TrueColor)
+	m := &Model{Width: 100, Height: 40, Style: re.NewStyle(), hoverLink: true,
+		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
+			Explanation: "some words about space.",
+			ApodDate:    time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)}}}
+	m.State = StateAPOD
+
+	link := m.apod.Link()
+	for y, raw := range strings.Split(m.baseView(), "\n") {
+		line := ansi.Strip(raw)
+		if !strings.Contains(line, "apod.nasa.gov") {
+			continue
+		}
+		// the escape must be gone once stripped, leaving only the visible URL
+		if strings.Contains(line, "]8;;") {
+			t.Fatalf("row %d: hyperlink escape rendered as text: %q", y, line)
+		}
+		start, end, ok := columnSpan(line, link)
+		if !ok {
+			t.Fatalf("row %d: link not found in %q", y, line)
+		}
+		if _, hit := m.hitTest((start+end)/2, y); !hit {
+			t.Errorf("row %d: no hover hit at the link's own columns", y)
+		}
+		return
+	}
+	t.Fatal("no link row in the frame")
 }
