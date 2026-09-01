@@ -61,7 +61,7 @@ type Model struct {
 	date             time.Time // the day being browsed; zero until the first load
 	latest           time.Time // the most recent day NASA has posted
 	imageOK          bool      // image bytes are ready to render
-	kittySent        bool      // image transmitted to the client's terminal
+	kittyReady       bool      // this day's photo is uploaded and placeable
 	preferArt        bool      // sextant art instead of the real photo
 	photoToggled     bool      // user overrode the art/photo default with the keybind
 	copiedRecently   bool
@@ -126,6 +126,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = msg.Height
 		m.Width = msg.Width
 		m.applyArtDefault()
+		cmds = append(cmds, m.sendKitty())
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
@@ -153,9 +154,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.State = StateFullscreen
 			}
 		case key.Matches(msg, keyPhoto):
-			if m.kittySent {
+			if m.KittyGraphics && m.imageOK {
 				m.preferArt = !m.preferArt
 				m.photoToggled = true
+				cmds = append(cmds, m.sendKitty())
 			}
 		case key.Matches(msg, keyCopy):
 			if m.apod != nil {
@@ -215,16 +217,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.latest = msg.apod.ApodDate // NASA posted a new one under us
 		}
 		m.imageOK = false
-		m.kittySent = false
+		m.kittyReady = false
 		m.imageLoading = true
 		m.placedCols, m.placedRows = 0, 0
 		m.State = StateAPOD
 		cmds = append(cmds, m.loadImage())
 	case imageMsg:
 		m.imageOK = msg.ok
-		m.kittySent = msg.kittySent
 		m.imageLoading = false
 		m.applyArtDefault()
+		cmds = append(cmds, m.sendKitty())
+	case kittyMsg:
+		if msg.apod == m.apod {
+			m.kittyReady = msg.ok
+			m.placedCols, m.placedRows = 0, 0
+		}
 	case msgSpin:
 		// when the spinner isn't visible the frame is unchanged and bubbletea
 		// skips the flush, so the perpetual tick is free
@@ -252,8 +259,14 @@ type apodMsg struct {
 }
 
 type imageMsg struct {
-	ok        bool
-	kittySent bool
+	ok bool
+}
+
+// kittyMsg reports an upload finishing. It carries the day it belongs to: the
+// reader may have moved on while megabytes were in flight.
+type kittyMsg struct {
+	apod *apod.APOD
+	ok   bool
 }
 
 // showDay switches to a day, if there is one there: NASA has nothing before
@@ -299,16 +312,31 @@ func (m *Model) loadImage() tea.Cmd {
 			slog.Warn("APOD has no image", "error", err)
 			return imageMsg{}
 		}
-		msg := imageMsg{ok: true}
-		if m.KittyGraphics && m.Session != nil {
-			png, err := a.PNGBytes()
-			if err != nil {
-				slog.Warn("failed to prepare png for kitty", "error", err)
-			} else if _, err := io.WriteString(m.Session, kittyTransmit(png)); err == nil {
-				msg.kittySent = true
-			}
+		return imageMsg{ok: true}
+	}
+}
+
+// sendKitty uploads the photo to the terminal, once per day and only when the
+// photo is what the reader is about to see. The payload is megabytes - a 565KB
+// source jpeg becomes 5MB of base64 - and the sextant art, which is what most
+// viewports get, needs none of it. Until it arrives, imageArea falls back to
+// the art, so the wait shows something rather than nothing.
+func (m *Model) sendKitty() tea.Cmd {
+	if !m.KittyGraphics || m.Session == nil || m.kittyReady || !m.imageOK || m.preferArt {
+		return nil
+	}
+	a, out := m.apod, m.Session
+	return func() tea.Msg {
+		png, err := a.PNGBytes()
+		if err != nil {
+			slog.Warn("failed to prepare png for kitty", "error", err)
+			return kittyMsg{apod: a}
 		}
-		return msg
+		if _, err := io.WriteString(out, kittyTransmit(png)); err != nil {
+			slog.Warn("failed to send image to the terminal", "error", err)
+			return kittyMsg{apod: a}
+		}
+		return kittyMsg{apod: a, ok: true}
 	}
 }
 
@@ -475,7 +503,7 @@ func (m *Model) helpKeys() []key.Binding {
 	if m.showingImage() {
 		keys = append(keys, keyFullscreen)
 		// image/ascii toggle only where the image is on screen; action-only label
-		if m.kittySent {
+		if m.KittyGraphics {
 			pDesc := "ascii"
 			if m.preferArt {
 				pDesc = "image"
@@ -751,7 +779,7 @@ func (m *Model) decorArt(freeWidth, freeHeight int) string {
 // so small windows default to the real photo.
 // ponytail: 60x20 threshold is a guess; tune if it feels wrong
 func (m *Model) applyArtDefault() {
-	if m.photoToggled || !m.kittySent {
+	if m.photoToggled || !m.KittyGraphics {
 		return
 	}
 	m.preferArt = m.Width >= 60 && m.Height >= 20
@@ -760,7 +788,7 @@ func (m *Model) applyArtDefault() {
 // imageArea renders the APOD image into a box of cols x rows cells: a kitty
 // graphics placement when the client supports it, sextant art otherwise.
 func (m *Model) imageArea(cols, rows int) string {
-	if m.kittySent && !m.preferArt {
+	if m.kittyReady && !m.preferArt {
 		// hand kitty the whole box: the terminal scales the image to fit
 		// using its real cell metrics, which beats our 1:2 cell-aspect guess
 		c := min(cols, len(kittyDiacritics))

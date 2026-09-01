@@ -1,6 +1,7 @@
 package airlockspace
 
 import (
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -195,5 +196,39 @@ func TestFailedDayKeepsTheCurrentOne(t *testing.T) {
 	m.Update(apodMsg{date: day(2026, 8, 30), apod: nil})
 	if !m.date.Equal(day(2026, 8, 31)) || m.State != StateAPOD {
 		t.Errorf("date = %v, state = %v; want to stay on 2026-08-31", m.date, m.State)
+	}
+}
+
+// the photo is megabytes over ssh; art mode must not pay for it
+func TestPhotoIsOnlySentWhenItWillBeSeen(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	m.KittyGraphics, m.Session, m.imageOK = true, io.Discard, true
+
+	m.preferArt = true
+	if cmd := m.sendKitty(); cmd != nil {
+		t.Error("uploaded the photo while showing sextant art")
+	}
+	m.preferArt = false
+	if cmd := m.sendKitty(); cmd == nil {
+		t.Error("did not upload the photo when the photo is what is shown")
+	}
+	m.kittyReady = true
+	if cmd := m.sendKitty(); cmd != nil {
+		t.Error("uploaded the same photo twice")
+	}
+}
+
+// the footer offers p on capability, not on having already paid for the upload
+func TestPhotoToggleOfferedBeforeTheUpload(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	m.KittyGraphics, m.Session, m.imageOK = true, io.Discard, true
+	m.imgOrExplanation, m.preferArt, m.kittyReady = true, true, false
+
+	var keys string
+	for _, k := range m.helpKeys() {
+		keys += k.Help().Key
+	}
+	if !strings.Contains(keys, "p") {
+		t.Errorf("footer %q offers no p toggle", keys)
 	}
 }
