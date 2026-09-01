@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,7 +40,7 @@ func main() {
 		// ponytail: flat 1h idle cutoff; per-session activity tracking if long-lived dashboards matter
 		wish.WithIdleTimeout(time.Hour),
 		wish.WithMiddleware(
-			bubbletea.Middleware(teaHandler),
+			bubbletea.MiddlewareWithProgramHandler(program, termenv.Ascii),
 			// runs after the tea program exits, outside the alt screen
 			func(next ssh.Handler) ssh.Handler {
 				return func(s ssh.Session) {
@@ -92,6 +94,31 @@ func main() {
 	}
 }
 
+// oneWriter serializes everything sent to the client. bubbletea's renderer and
+// our own kitty image transmissions run on different goroutines, and until
+// both went through here they were two hoses into one connection: a frame
+// landing inside an image payload leaves the terminal in pieces.
+type oneWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (o *oneWriter) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.w.Write(p)
+}
+
+// program builds the tea.Program itself, which the default middleware does not
+// allow: it appends its own WithOutput last, and we need ours to win.
+func program(s ssh.Session) *tea.Program {
+	m, opts := teaHandler(s)
+	if m == nil {
+		return nil
+	}
+	return tea.NewProgram(m, opts...)
+}
+
 // You can wire any Bubble Tea model up to the middleware with a function that
 // handles the incoming ssh.Session. Here we just grab the terminal info and
 // pass it to the new model. You can also return tea.ProgramOptions (such as
@@ -126,15 +153,24 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	renderer.SetColorProfile(profile)
 	s.Context().SetValue(profileKey, profile)
 
+	// one writer for the renderer and for our image writes, in that order of
+	// discovery: wish's MakeOptions picks the right input, our WithOutput then
+	// replaces the output it chose.
+	out := &oneWriter{w: s}
 	m := &airlockspace.Model{
 		Width:         pty.Window.Width,
 		Height:        pty.Window.Height,
 		Style:         renderer.NewStyle(),
 		Profile:       profile,
 		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram),
-		Session:       s,
+		Session:       out,
 	}
-	return m, []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseAllMotion()}
+	opts := append(bubbletea.MakeOptions(s),
+		tea.WithOutput(out),
+		tea.WithAltScreen(),
+		tea.WithMouseAllMotion(),
+	)
+	return m, opts
 }
 
 // supportsKittyGraphics reports whether the client terminal implements the
