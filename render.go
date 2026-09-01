@@ -110,9 +110,24 @@ func cachedSextant(date string, decode func() (image.Image, error), cols, rows i
 // 23% of the pixels and 62% of the bytes.
 func kittyPNG(img image.Image, maxW, maxH int) ([]byte, error) {
 	b := img.Bounds()
+	w, h := fitImage(b.Dx(), b.Dy(), maxW, maxH)
 	// only ever down: upscaling here would just cost bytes, and the terminal
 	// scales the placement to the cell box anyway
-	if w, h := fitImage(b.Dx(), b.Dy(), maxW, maxH); w >= 1 && h >= 1 && (w < b.Dx() || h < b.Dy()) {
+	if w > b.Dx() || h > b.Dy() {
+		w, h = b.Dx(), b.Dy()
+	}
+	// The session can only ask for so much - the picture is a column 72 cells
+	// wide and the rows the page leaves it. What is unbounded is the other
+	// side: NASA's image is whatever NASA posted, and a hidpi terminal has a
+	// box big enough to ask for all of it. Every picture so far fits under
+	// this, so it changes nothing today; it is here so that one enormous day
+	// cannot decide by itself how many megabytes go down every connection, and
+	// how much of a 512MB box is spent resampling it.
+	if px := w * h; px > maxPhotoPixels {
+		s := math.Sqrt(float64(maxPhotoPixels) / float64(px))
+		w, h = max(1, int(float64(w)*s)), max(1, int(float64(h)*s))
+	}
+	if w >= 1 && h >= 1 && (w < b.Dx() || h < b.Dy()) {
 		dst := image.NewRGBA(image.Rect(0, 0, w, h))
 		xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
 		img = dst
@@ -121,6 +136,10 @@ func kittyPNG(img image.Image, maxW, maxH int) ([]byte, error) {
 	err := png.Encode(&buf, img)
 	return buf.Bytes(), err
 }
+
+// maxPhotoPixels bounds what one photo may be encoded to, whatever was posted
+// and whatever the terminal has room for.
+const maxPhotoPixels = 2 << 20 // ~2 megapixels
 
 // kitty graphics protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/
 const kittyImageID = 42

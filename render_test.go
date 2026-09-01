@@ -135,6 +135,36 @@ func TestPhotoBoxIsThePaneNotTheScreen(t *testing.T) {
 	}
 }
 
+// NASA's picture is whatever NASA posted, and a hidpi terminal has a box big
+// enough to ask for all of it. One day's photo does not get to decide how many
+// megabytes go down every connection.
+func TestKittyPNGIsCapped(t *testing.T) {
+	huge := image.NewRGBA(image.Rect(0, 0, 4000, 6000))
+	byt, err := kittyPNG(huge, 4000, 6000) // a box with room for all of it
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(byt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if px := cfg.Width * cfg.Height; px > maxPhotoPixels {
+		t.Errorf("encoded %dx%d = %d pixels; cap is %d", cfg.Width, cfg.Height, px, maxPhotoPixels)
+	}
+	// the picture keeps its shape through the capping
+	if want, got := 4000.0/6000.0, float64(cfg.Width)/float64(cfg.Height); got < want*0.98 || got > want*1.02 {
+		t.Errorf("capping changed the aspect: %.3f, want %.3f", got, want)
+	}
+
+	// an ordinary picture in an ordinary box is left alone
+	ord := image.NewRGBA(image.Rect(0, 0, 1059, 1641))
+	byt, _ = kittyPNG(ord, 576, 760)
+	cfg, _ = png.DecodeConfig(bytes.NewReader(byt))
+	if cfg.Width != 490 || cfg.Height != 760 {
+		t.Errorf("ordinary encode came out %dx%d; want the plain fit 490x760", cfg.Width, cfg.Height)
+	}
+}
+
 // without the terminal's own answer, fall back to the ssh window, then to a
 // plain guess at the cell
 func TestCellPixels(t *testing.T) {

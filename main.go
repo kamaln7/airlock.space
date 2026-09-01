@@ -444,9 +444,11 @@ const photoChrome = 12
 func (m *Model) photoBox() (w, h int) {
 	cw, ch := m.cellPixels()
 	if m.State == StateFullscreen {
-		return max(1, m.Width) * cw, max(1, m.Height) * ch
+		w, h = max(1, m.Width)*cw, max(1, m.Height)*ch
+	} else {
+		w, h = min(imageMaxWidth, max(1, m.Width-2))*cw, max(1, m.Height-photoChrome)*ch
 	}
-	return min(imageMaxWidth, max(1, m.Width-2)) * cw, max(1, m.Height-photoChrome) * ch
+	return w, h
 }
 
 // sendKitty uploads the photo to the terminal, once per day and only when the
