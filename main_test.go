@@ -931,7 +931,7 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 		t.Fatal("no art drawn to begin with")
 	}
 
-	m.Update(tea.WindowSizeMsg{Width: 118, Height: 26})
+	m.Update(tea.WindowSizeMsg{Width: 142, Height: 34})
 	if !m.resizing {
 		t.Fatal("a resize did not start")
 	}
@@ -941,15 +941,15 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 
 	// the page catches up first, and the art is still the old one, cut to fit
 	m.Update(msgResized{gen: m.resizeGen, kind: settleLayout})
-	if m.Width != 118 {
+	if m.Width != 142 {
 		t.Fatalf("the page did not reflow on its settle: %d", m.Width)
 	}
 	frame := m.baseView()
 	if m.lastArt != drawn {
 		t.Error("art was drawn again before its own settle")
 	}
-	if m.clipped == "" {
-		t.Error("the picture vanished instead of holding its last shape")
+	if strings.TrimSpace(ansi.Strip(frame)) == "" {
+		t.Error("the frame went blank while the art was held")
 	}
 	if !strings.Contains(ansi.Strip(frame), m.apod.Title) {
 		t.Error("the page did not reflow with the rest")
@@ -965,6 +965,32 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 	}
 }
 
+// a page laid out larger than the terminal is centered, so cutting it to fit
+// slides it sideways and drops the bottom off. Shrinking reflows at once
+// rather than showing that and jumping back.
+func TestShrinkingReflowsAtOnce(t *testing.T) {
+	m := besideImage(t, 150, 40)
+
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.Width != 100 || m.Height != 30 {
+		t.Errorf("page is still %dx%d after the terminal shrank to 100x30", m.Width, m.Height)
+	}
+	// the expensive work still waits for the dragging to stop
+	if !m.resizing {
+		t.Error("shrinking drew the art immediately")
+	}
+	if m.sentW != 0 {
+		t.Error("shrinking sent a photo immediately")
+	}
+
+	// growing is what waits
+	m.Update(msgResized{gen: m.resizeGen, kind: settleArt})
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 44})
+	if m.Width != 100 {
+		t.Errorf("growing reflowed at once, to %d", m.Width)
+	}
+}
+
 // dragging a window edge fires resizes by the dozen, and each kind of work
 // waits for the dragging to pause for as long as it costs
 func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
@@ -973,7 +999,7 @@ func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
 
 	was := m.Width
 	for i := range 5 {
-		m.Update(tea.WindowSizeMsg{Width: 120 + i, Height: 30})
+		m.Update(tea.WindowSizeMsg{Width: 150 + i, Height: 40})
 	}
 	if m.sentW != 0 {
 		t.Fatal("a photo went out mid-drag")
@@ -993,8 +1019,8 @@ func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
 
 	// each settle does its own share and no more
 	m.Update(msgResized{gen: latest, kind: settleLayout})
-	if m.Width != 124 {
-		t.Errorf("the page is laid out to %d after settling; want the last size, 124", m.Width)
+	if m.Width != 154 {
+		t.Errorf("the page is laid out to %d after settling; want the last size, 154", m.Width)
 	}
 	if !m.resizing || m.sentW != 0 {
 		t.Error("the layout settle drew art or sent a photo; neither is its job")

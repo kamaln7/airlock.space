@@ -195,8 +195,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizing = true
 		m.resizeGen++
 		gen := m.resizeGen
-		if m.Width == 0 || m.Height == 0 {
-			m.reflow() // the first size: there is no old page to hold
+		// Shrinking is applied at once. A page laid out wider or taller than
+		// the terminal it is drawn in does not simply overhang: it is centered,
+		// so cutting it to fit slides everything sideways and takes the link
+		// and the help bar off the bottom, and it all jumps back when the
+		// reflow lands. Growing has no such trouble - the page is merely
+		// smaller than the room it has - so that is what waits.
+		if m.Width == 0 || m.Height == 0 || m.trueW < m.Width || m.trueH < m.Height {
+			m.reflow()
 		}
 		// a resize can also mean a new font size, and so a new cell
 		cmds = append(cmds, requestCellSize,
@@ -609,11 +615,6 @@ func (m *Model) render() string {
 	view := m.baseView()
 	if m.selActive {
 		view = m.applySelection(view)
-	}
-	// laid out to the old size for a moment after a resize, so cut it to the
-	// real one rather than let long rows wrap into the next
-	if m.trueW > 0 && (m.trueW < m.Width || m.trueH < m.Height) {
-		view = clipTo(view, m.trueW, m.trueH)
 	}
 	return view
 }
