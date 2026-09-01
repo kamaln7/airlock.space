@@ -28,10 +28,15 @@ var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
 var apodMovingNotice = regexp.MustCompile(`\s*APOD.s main NASA (web\s?)?site is moving:.*`)
 
 // explanationText is the displayed explanation: notice stripped, NASA's
-// space-run separators turned into real paragraph breaks.
+// space-run separators turned into real paragraph breaks. Memoized: it is
+// consulted per selected row on every drag event.
 func (m *Model) explanationText() string {
-	expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
-	return paragraphBreaks.ReplaceAllString(expl, "\n\n")
+	if m.explCacheFor != m.apod {
+		expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
+		m.explCache = paragraphBreaks.ReplaceAllString(expl, "\n\n")
+		m.explCacheFor = m.apod
+	}
+	return m.explCache
 }
 
 var (
@@ -68,6 +73,8 @@ type Model struct {
 	selPending       bool   // left button went down inside the selectable region
 	artKey           string // memoized decorative art (stable across renders)
 	art              string
+	explCache        string // memoized processed explanation
+	explCacheFor     *apod.APOD
 	placedCols       int // current kitty virtual placement size
 	placedRows       int
 	imageLoading     bool
@@ -158,15 +165,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case msg.Action == tea.MouseActionMotion:
 			m.mouseX, m.mouseY = msg.X, msg.Y
-			m.hoverKey = m.helpHitTest(msg.X, msg.Y)
-			m.hoverLink = m.linkHitTest(msg.X, msg.Y)
+			m.hoverKey, m.hoverLink = m.hitTest(msg.X, msg.Y)
 		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
 			m.selActive, m.selPending = false, false
-			if k := m.helpHitTest(msg.X, msg.Y); k != "" {
+			helpKey, onLink := m.hitTest(msg.X, msg.Y)
+			if helpKey != "" {
 				// dispatch the clicked help item as if its key was pressed
-				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(helpKey)})
 			}
-			if m.linkHitTest(msg.X, msg.Y) {
+			if onLink {
 				cmds = append(cmds, m.copyLink())
 			}
 			// selection can start anywhere; it only ever applies to copyable text
@@ -211,8 +218,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// stationary mouse: any keypress (footer items appear/disappear even
 	// within a state, e.g. the explanation/image toggle) or state change
 	if _, isKey := msg.(tea.KeyMsg); isKey || m.State != prevState {
-		m.hoverKey = m.helpHitTest(m.mouseX, m.mouseY)
-		m.hoverLink = m.linkHitTest(m.mouseX, m.mouseY)
+		m.hoverKey, m.hoverLink = m.hitTest(m.mouseX, m.mouseY)
 		m.selActive = false // the frame changed under the selection
 	}
 	return m, tea.Batch(cmds...)
@@ -455,14 +461,14 @@ func (m *Model) selBounds() (a, b point) {
 	return a, b
 }
 
-// copyableSpan returns the column span of copyable text on screen row y:
-// the APOD title (any view) or a line of the explanation. Everything else —
-// headers, dates, gaps, art, footer — is not selectable.
-func (m *Model) copyableSpan(y int) (x1, x2 int, ok bool) {
+// copyableSpan returns the column span of copyable text on a stripped frame
+// line: the APOD title (any view) or a line of the explanation. Everything
+// else — headers, dates, gaps, art, footer — is not selectable. It takes the
+// line rather than rendering the frame itself: it runs per row per drag event.
+func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 	if m.apod == nil {
 		return 0, 0, false
 	}
-	line := m.frameLine(y)
 
 	// the full title on one row (main screen header row, or its own row)
 	if s, e, found := columnSpan(line, m.apod.Title); found {
@@ -492,14 +498,14 @@ func (m *Model) copyableSpan(y int) (x1, x2 int, ok bool) {
 	return 0, 0, false
 }
 
-// selSpan gives the highlighted column range on row y: the raw linewise drag
-// span intersected with the row's copyable text.
-func (m *Model) selSpan(y, lineWidth int) (x1, x2 int, ok bool) {
+// selSpan gives the highlighted column range on row y (stripped line given):
+// the raw linewise drag span intersected with the row's copyable text.
+func (m *Model) selSpan(y int, line string) (x1, x2 int, ok bool) {
 	a, b := m.selBounds()
 	if y < a.Y || y > b.Y {
 		return 0, 0, false
 	}
-	c1, c2, copyable := m.copyableSpan(y)
+	c1, c2, copyable := m.copyableSpan(line)
 	if !copyable {
 		return 0, 0, false
 	}
@@ -519,7 +525,7 @@ func (m *Model) applySelection(frame string) string {
 	a, b := m.selBounds()
 	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
 		line := lines[y]
-		x1, x2, ok := m.selSpan(y, ansi.StringWidth(line))
+		x1, x2, ok := m.selSpan(y, ansi.Strip(line))
 		if !ok {
 			continue
 		}
@@ -537,7 +543,7 @@ func (m *Model) selectionText() string {
 	var out []string
 	for y := max(0, a.Y); y <= b.Y && y < len(lines); y++ {
 		line := ansi.Strip(lines[y])
-		x1, x2, ok := m.selSpan(y, ansi.StringWidth(line))
+		x1, x2, ok := m.selSpan(y, line)
 		if !ok {
 			out = append(out, "")
 			continue
@@ -581,29 +587,24 @@ func (m *Model) isHelpLine(line string) bool {
 	return matches >= 2
 }
 
-// helpHitTest returns the key under the mouse position, or "".
-func (m *Model) helpHitTest(x, y int) string {
+// hitTest resolves what's under the mouse in one frame render: a help bar key
+// (or "") and whether the link URL is hovered.
+func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 	line := m.frameLine(y)
-	if !m.isHelpLine(line) {
-		return ""
-	}
-	for _, k := range m.helpKeys() {
-		h := k.Help()
-		if start, end, ok := columnSpan(line, h.Key+" "+h.Desc); ok && x >= start && x < end {
-			return h.Key
+	if m.isHelpLine(line) {
+		for _, k := range m.helpKeys() {
+			h := k.Help()
+			if start, end, ok := columnSpan(line, h.Key+" "+h.Desc); ok && x >= start && x < end {
+				helpKey = h.Key
+				break
+			}
 		}
 	}
-	return ""
-}
-
-// linkHitTest reports whether the mouse is on the URL in the link view.
-func (m *Model) linkHitTest(x, y int) bool {
-	if m.State != StateLink || m.apod == nil {
-		return false
+	if m.State == StateLink && m.apod != nil {
+		start, end, ok := columnSpan(line, m.apod.Link())
+		link = ok && x >= start && x < end
 	}
-	line := m.frameLine(y)
-	start, end, ok := columnSpan(line, m.apod.Link())
-	return ok && x >= start && x < end
+	return helpKey, link
 }
 
 // loadingLine is the spinner + label, shared by both loading phases.
