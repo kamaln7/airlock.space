@@ -29,8 +29,10 @@ var Today = resolvable.New(
 type APOD struct {
 	*nasa.Image
 
-	// ImageBytes is the compressed source image (jpeg/png). Decode on demand
-	// and discard: a decoded APOD is tens of MB, the box has 512.
+	// ImageBytes is the compressed source image (jpeg/png), or nil on the days
+	// NASA posts a video instead. That absence is a value, not an error, so it
+	// caches: an error would send every new session through the fetch again.
+	// Decode on demand and discard: a decoded APOD is tens of MB, the box has 512.
 	ImageBytes resolvable.V[[]byte]
 	// PNGBytes is a PNG transcode for the kitty graphics protocol, only
 	// materialized when a kitty-capable client connects.
@@ -111,13 +113,12 @@ func (a *APOD) imageURLs() []string {
 	return urls
 }
 
-// errNoImage marks a settled "this APOD has no image" (a video day), as
-// opposed to a transient fetch failure worth retrying.
-var errNoImage = errors.New("no image for this APOD")
+// errNotAnImage means the URL served something that is not an image (an mp4 on
+// video days), so there is nothing here to retry.
+var errNotAnImage = errors.New("not an image")
 
-// getImageBytes resolves nil bytes, not an error, when the APOD simply has no
-// image: resolvable never caches errors, so an error here would make every new
-// session sit through the fetch and its retries again.
+// getImageBytes resolves nil bytes for an APOD that has no image, and an error
+// only when the fetch itself failed and is worth another try.
 func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 	urls := a.imageURLs()
 	if len(urls) == 0 {
@@ -139,7 +140,7 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
 		return body, nil
 	}
-	if errors.Is(lastErr, errNoImage) {
+	if errors.Is(lastErr, errNotAnImage) {
 		return nil, nil
 	}
 	return nil, lastErr
@@ -164,7 +165,7 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 	}
 	// video days serve an mp4/youtube page; don't download megabytes just to fail decoding
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
-		return nil, fmt.Errorf("%w: content-type %q", errNoImage, ct)
+		return nil, fmt.Errorf("%w: content-type %q", errNotAnImage, ct)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -180,7 +181,7 @@ func (a *APOD) getPNGBytes(_ context.Context) ([]byte, error) {
 		return nil, err
 	}
 	if len(byt) == 0 {
-		return nil, errNoImage
+		return nil, errNotAnImage
 	}
 	if http.DetectContentType(byt) == "image/png" {
 		return byt, nil

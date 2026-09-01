@@ -2,8 +2,12 @@ package apod
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/peteretelej/nasa"
 )
 
 func TestRedactAPIKey(t *testing.T) {
@@ -14,5 +18,23 @@ func TestRedactAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(got, "api_key=REDACTED") {
 		t.Fatalf("expected redaction marker: %s", got)
+	}
+}
+
+// a video day is an absence, not a failure: it must resolve to nil bytes so it
+// caches, instead of sending every new session back through the fetch
+func TestVideoDayResolvesToNilBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Write([]byte("not an image"))
+	}))
+	defer srv.Close()
+
+	a := newAPOD(&nasa.Image{URL: srv.URL + "/apod.mp4"})
+	for range 2 {
+		byt, err := a.ImageBytes()
+		if err != nil || byt != nil {
+			t.Fatalf("ImageBytes() = %v, %v; want nil, nil", byt, err)
+		}
 	}
 }
