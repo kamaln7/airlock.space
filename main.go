@@ -351,6 +351,21 @@ func (m *Model) loadImage() tea.Cmd {
 // a hidpi screen this is the hidpi box and the photo stays sharp.
 // ponytail: 10x20 per cell when the client sends no pixel size, and the cell
 // size is read once - a font size change mid-session goes unnoticed.
+// defaultCellAspect is the usual terminal cell: twice as tall as it is wide.
+const defaultCellAspect = 2
+
+// cellAspect is how many times taller this client's cells are than they are
+// wide. ssh reports the drawable size in pixels beside the cell grid, so where
+// the client sends it the real shape is known rather than assumed.
+func (m *Model) cellAspect() float64 {
+	if m.WidthPixels > 0 && m.HeightPixels > 0 && m.Width > 0 && m.Height > 0 {
+		cellW := float64(m.WidthPixels) / float64(m.Width)
+		cellH := float64(m.HeightPixels) / float64(m.Height)
+		return cellH / cellW
+	}
+	return defaultCellAspect
+}
+
 func (m *Model) pixelBox() (w, h int) {
 	if m.WidthPixels > 0 && m.HeightPixels > 0 {
 		return m.WidthPixels, m.HeightPixels
@@ -883,14 +898,17 @@ func (m *Model) applyArtDefault() {
 // imageArea renders the APOD image into a box of cols x rows cells: a kitty
 // graphics placement when the client supports it, sextant art otherwise.
 func (m *Model) imageArea(cols, rows int) string {
+	// both paths get the same aspect-correct box. Handing kitty the whole box
+	// and letting it scale looks tempting - it knows its own cell metrics -
+	// but the protocol stretches an image to fill whatever c x r it is given
+	// once both are named, so the box itself has to carry the aspect ratio.
+	c, r := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, cols, rows, m.cellAspect())
+	if c < 1 || r < 1 {
+		return ""
+	}
+
 	if m.kittyReady && !m.preferArt {
-		// hand kitty the whole box: the terminal scales the image to fit
-		// using its real cell metrics, which beats our 1:2 cell-aspect guess
-		c := min(cols, len(kittyDiacritics))
-		r := min(rows, len(kittyDiacritics))
-		if c < 1 || r < 1 {
-			return ""
-		}
+		c, r = min(c, len(kittyDiacritics)), min(r, len(kittyDiacritics))
 		if m.placedCols != c || m.placedRows != r {
 			// virtual placements draw nothing; safe to write outside the renderer
 			io.WriteString(m.Session, kittyVirtualPlacement(c, r))
@@ -899,10 +917,6 @@ func (m *Model) imageArea(cols, rows int) string {
 		return kittyPlaceholders(c, r)
 	}
 
-	c, r := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, cols, rows)
-	if c < 1 || r < 1 {
-		return ""
-	}
 	s, err := cachedSextant(m.apod.Date, m.apod.Decode, c, r, canvasMode(m.Profile))
 	if err != nil {
 		slog.Warn("failed to render image", "error", err)

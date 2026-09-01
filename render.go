@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/draw"
 	"image/png"
+	"math"
 	"strings"
 	"sync"
 
@@ -16,9 +17,13 @@ import (
 )
 
 // fitCells fits an image of imgW x imgH pixels into a box of cells, preserving
-// aspect ratio. A terminal cell is ~twice as tall as it is wide.
-func fitCells(imgW, imgH, boxCols, boxRows int) (cols, rows int) {
-	return fitImage(imgW, imgH/2, boxCols, boxRows)
+// aspect ratio. cellAspect is how many times taller a cell is than it is wide,
+// the number that turns pixels into cells.
+func fitCells(imgW, imgH, boxCols, boxRows int, cellAspect float64) (cols, rows int) {
+	if cellAspect <= 0 {
+		cellAspect = defaultCellAspect
+	}
+	return fitImage(imgW, int(math.Round(float64(imgH)/cellAspect)), boxCols, boxRows)
 }
 
 func canvasMode(p colorprofile.Profile) chafa.CanvasMode {

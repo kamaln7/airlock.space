@@ -1,6 +1,8 @@
 package airlockspace
 
 import (
+	"fmt"
+	"image"
 	"io"
 	"slices"
 	"strings"
@@ -258,6 +260,55 @@ func TestTitleIsSelectableOnItsOwnRow(t *testing.T) {
 	}
 	if _, _, ok := m.copyableSpan(ansi.Strip(lines[row-1])); ok {
 		t.Error("the calendar row is selectable; only the title and explanation are")
+	}
+}
+
+// kitty stretches an image to fill whatever c x r it is handed once both are
+// named, so the placement box has to carry the image's aspect ratio. Handing
+// it the whole area distorts every image that is not the shape of the area.
+func TestKittyPlacementCarriesTheAspect(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		imgW, imgH         int
+		wantCols, wantRows int
+	}{
+		{"tall", 1000, 2000, 40, 40}, // 1000 x 1000 in cells -> square
+		{"wide", 2000, 500, 60, 8},   // 2000 x 250 in cells, width-bound
+		{"square", 1200, 1200, 60, 30},
+	} {
+		var out strings.Builder
+		m := testModel(t, day(2026, 8, 20))
+		m.Width, m.Height = 100, 50
+		m.WidthPixels, m.HeightPixels = 1000, 1000 // 10x20 px cells: aspect 2
+		m.Session, m.KittyGraphics = &out, true
+		m.imageOK, m.kittyReady = true, true
+		m.apod.ImageSize = image.Point{X: tc.imgW, Y: tc.imgH}
+
+		m.imageArea(60, 40) // a box that is not the image's shape
+
+		want := fmt.Sprintf("c=%d,r=%d", tc.wantCols, tc.wantRows)
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("%s: placement %q has no %q", tc.name, out.String(), want)
+		}
+		if strings.Contains(out.String(), "c=60,r=40") && tc.name != "square" {
+			t.Errorf("%s: handed kitty the whole box; the image will be stretched", tc.name)
+		}
+	}
+}
+
+// the reported pixel size gives the real cell shape; without it, assume 2:1
+func TestCellAspect(t *testing.T) {
+	m := &Model{Width: 100, Height: 50}
+	if got := m.cellAspect(); got != defaultCellAspect {
+		t.Errorf("cellAspect() = %v with no pixel size; want %v", got, defaultCellAspect)
+	}
+	m.WidthPixels, m.HeightPixels = 1000, 1000 // 10x20 px cells
+	if got := m.cellAspect(); got != 2 {
+		t.Errorf("cellAspect() = %v; want 2", got)
+	}
+	m.WidthPixels, m.HeightPixels = 800, 1200 // 8x24 px cells, a taller cell
+	if got := m.cellAspect(); got != 3 {
+		t.Errorf("cellAspect() = %v; want 3", got)
 	}
 }
 

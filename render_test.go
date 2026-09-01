@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"strings"
 	"testing"
 
@@ -34,9 +35,41 @@ func TestRenderSextant(t *testing.T) {
 
 func TestFitCells(t *testing.T) {
 	// 1024x512 image into an 80x24 cell box: cell aspect halves the height
-	cols, rows := fitCells(1024, 512, 80, 24)
+	cols, rows := fitCells(1024, 512, 80, 24, 2)
 	if cols != 80 || rows != 20 {
 		t.Fatalf("got %dx%d, want 80x20", cols, rows)
+	}
+}
+
+// the shapes APOD actually posts: panoramas, portraits and squares all have to
+// come out of the box with their proportions intact, never stretched to it
+func TestFitCellsKeepsAspect(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		imgW, imgH       int
+		boxCols, boxRows int
+	}{
+		{"very wide", 3000, 800, 80, 40},
+		{"wide", 1600, 900, 80, 40},
+		{"square", 1280, 1280, 80, 40},
+		{"tall", 1059, 1641, 80, 40},
+		{"very tall", 800, 2400, 80, 40},
+	} {
+		cols, rows := fitCells(tc.imgW, tc.imgH, tc.boxCols, tc.boxRows, 2)
+		if cols < 1 || rows < 1 {
+			t.Errorf("%s: got an empty %dx%d box", tc.name, cols, rows)
+			continue
+		}
+		if cols > tc.boxCols || rows > tc.boxRows {
+			t.Errorf("%s: %dx%d overflows the %dx%d box", tc.name, cols, rows, tc.boxCols, tc.boxRows)
+		}
+		// a cell is twice as tall as it is wide, so the drawn image is
+		// cols x 2*rows in image proportions
+		want := float64(tc.imgW) / float64(tc.imgH)
+		got := float64(cols) / float64(2*rows)
+		if math.Abs(got-want)/want > 0.08 {
+			t.Errorf("%s: %dx%d cells is aspect %.2f; want %.2f", tc.name, cols, rows, got, want)
+		}
 	}
 }
 
