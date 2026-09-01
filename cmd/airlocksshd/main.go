@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -103,29 +102,11 @@ func main() {
 // both went through here they were two hoses into one connection: a frame
 // landing inside an image payload leaves the terminal in pieces.
 type oneWriter struct {
-	mu     sync.Mutex
-	frames atomic.Int32 // renderer writes waiting or in flight
-	w      io.Writer
+	mu sync.Mutex
+	w  io.Writer
 }
 
 func (o *oneWriter) Write(p []byte) (int, error) {
-	o.frames.Add(1)
-	o.mu.Lock()
-	o.frames.Add(-1)
-	defer o.mu.Unlock()
-	return o.w.Write(p)
-}
-
-// WriteBulk is the path for the megabytes of a photo. It stands aside for any
-// frame waiting to go out, so the screen keeps moving while the photo travels.
-// Taking turns is not enough on its own: the sender re-takes the connection
-// the instant it lets go, and a frame waiting on it got through twice in four
-// hundred chunks. Frames are small and rare, so standing aside for them costs
-// a transfer almost nothing.
-func (o *oneWriter) WriteBulk(p []byte) (int, error) {
-	for o.frames.Load() > 0 {
-		time.Sleep(time.Millisecond)
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.w.Write(p)

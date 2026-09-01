@@ -1,8 +1,11 @@
 package airlockspace
 
 import (
+	"bytes"
 	"fmt"
 	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"maps"
 	"slices"
@@ -356,7 +359,22 @@ func besideImage(t *testing.T, w, h int) *Model {
 	m.apod.ImageSize = image.Point{X: 1059, Y: 1641}
 	m.Session, m.KittyGraphics = io.Discard, true
 	m.imageOK, m.kittyReady = true, true
+	m.apod.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
 	return m
+}
+
+// tinyPNG is a real image, so the sextant path has something to decode when a
+// test takes it rather than the kitty one.
+func tinyPNG() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 32, 48))
+	for y := range 48 {
+		for x := range 32 {
+			img.Set(x, y, color.RGBA{uint8(x * 8), uint8(y * 5), 160, 255})
+		}
+	}
+	var b bytes.Buffer
+	png.Encode(&b, img)
+	return b.Bytes()
 }
 
 // the picture and the text share rows now, so selection can no longer assume
@@ -787,37 +805,64 @@ func TestKittyChunksAreWellFormed(t *testing.T) {
 	}
 }
 
-// the bar reports the upload while it is running and nothing once it is not
-func TestProgressBarTracksTheUpload(t *testing.T) {
+// the banner goes out ahead of the photo's own bytes, and takes a row that
+// was already there, so nothing moves when it comes or goes
+func TestSendingBannerTakesAReservedRow(t *testing.T) {
 	m := besideImage(t, 130, 30)
-	if got := m.viewProgress(); got != "" {
-		t.Errorf("a bar with no upload in flight: %q", got)
+	if got := m.viewSending(); got != "" {
+		t.Errorf("banner with nothing being sent: %q", got)
 	}
-
-	m.xfer = &xfer{}
-	m.xfer.total.Store(1000)
-	m.xfer.sent.Store(250)
-	bar := ansi.Strip(m.viewProgress())
-	if !strings.Contains(bar, "25%") {
-		t.Errorf("bar at a quarter reads %q", bar)
-	}
-	if !strings.Contains(bar, "sending photo") {
-		t.Errorf("bar does not say what it is doing: %q", bar)
-	}
-
-	m.xfer.sent.Store(1000)
-	if got := m.viewProgress(); got != "" {
-		t.Errorf("bar still showing after the upload landed: %q", got)
-	}
-
-	// and it takes a row that was already reserved, so nothing moves
-	m.xfer = nil
 	quiet := countLines(m.baseView())
-	m.xfer = &xfer{}
-	m.xfer.total.Store(1000)
-	m.xfer.sent.Store(500)
+
+	// raised by the send itself, before a byte of the photo goes out
+	m.preferArt, m.kittyReady = false, false
+	if cmd := m.sendKitty(); cmd == nil {
+		t.Fatal("nothing to send")
+	}
+	if !m.sending {
+		t.Fatal("sending the photo did not raise the banner")
+	}
+	if !strings.Contains(ansi.Strip(m.viewSending()), "loading photo") {
+		t.Errorf("banner does not say what it is doing: %q", m.viewSending())
+	}
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading photo") {
+		t.Error("banner is not on the frame")
+	}
 	if busy := countLines(m.baseView()); busy != quiet {
 		t.Errorf("frame is %d rows while sending, %d otherwise", busy, quiet)
+	}
+
+	// and lowered when the photo lands
+	m.Update(kittyMsg{apod: m.apod, ok: true})
+	if m.sending {
+		t.Error("banner still up after the photo arrived")
+	}
+}
+
+// the photo is megabytes; asking for it on one day is not asking for it on
+// every day after
+func TestNewDayGoesBackToArt(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.preferArt = true                              // as a fresh day starts
+	m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"}) // ask for the photo
+	if m.preferArt {
+		t.Fatal("p did not switch to the photo")
+	}
+	if !m.photoToggled {
+		t.Fatal("p did not record that the reader chose")
+	}
+
+	next := &apod.APOD{Image: &nasa.Image{Title: "Another Day",
+		Explanation: "more words", ApodDate: day(2026, 8, 19)}}
+	next.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
+	m.date = day(2026, 8, 19)
+	m.Update(apodMsg{date: day(2026, 8, 19), apod: next})
+
+	if !m.preferArt {
+		t.Error("the photo followed the reader to the next day")
+	}
+	if m.photoToggled {
+		t.Error("the next p should toggle from the default, not from a stale choice")
 	}
 }
 

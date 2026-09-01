@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -112,8 +111,8 @@ type Model struct {
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
 	vpWidth        int
-	xfer           *xfer // the upload in flight, if any
-	placedCols     int   // current kitty virtual placement size
+	sending        bool // the photo is on its way to the terminal
+	placedCols     int  // current kitty virtual placement size
 	placedRows     int
 	imageLoading   bool
 	spinFrame      int
@@ -256,6 +255,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.imageOK = false
 		m.kittyReady = false
 		m.imageLoading = true
+		// a new day starts as art again: the photo is megabytes, and having
+		// asked for it on one picture is not asking for it on every one after
+		m.photoToggled = false
+		m.applyArtDefault()
 		m.placedCols, m.placedRows = 0, 0
 		m.State = StateAPOD
 		cmds = append(cmds, m.loadImage())
@@ -265,6 +268,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyArtDefault()
 		cmds = append(cmds, m.sendKitty())
 	case kittyMsg:
+		m.sending = false
 		if msg.apod == m.apod {
 			m.kittyReady = msg.ok
 			m.placedCols, m.placedRows = 0, 0
@@ -274,7 +278,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.isLight = !msg.IsDark()
 	case msgSpin:
-		dbgSpins.Add(1)
 		// when the spinner isn't visible the frame is unchanged and bubbletea
 		// skips the flush, so the perpetual tick is free
 		m.spinFrame++
@@ -402,44 +405,6 @@ func (m *Model) pixelBox() (w, h int) {
 	return m.Width * 10, m.Height * 20
 }
 
-// xfer is how far the picture has got on its way to the terminal. Written by
-// the goroutine doing the sending and read by the view, which is why it is
-// atomic rather than a plain pair of ints on the model.
-type xfer struct{ sent, total atomic.Int64 }
-
-// progress is how much of the upload has landed, and whether one is running.
-func (x *xfer) progress() (float64, bool) {
-	if x == nil {
-		return 0, false
-	}
-	total, sent := x.total.Load(), x.sent.Load()
-	if total <= 0 || sent >= total {
-		return 0, false
-	}
-	return float64(sent) / float64(total), true
-}
-
-// chunkPause paces the upload so frames can get onto the wire between chunks.
-const chunkPause = time.Millisecond
-
-// bulkWriter is a session that can be told which writes are the big ones, so
-// frames can be let past them. The ssh server provides one; a local terminal
-// is its own consumer and does not need to.
-type bulkWriter interface {
-	WriteBulk(p []byte) (int, error)
-}
-
-// writeBulk sends a slab of image data, standing aside for frames where the
-// connection knows how.
-func writeBulk(w io.Writer, s string) error {
-	if bw, ok := w.(bulkWriter); ok {
-		_, err := bw.WriteBulk([]byte(s))
-		return err
-	}
-	_, err := io.WriteString(w, s)
-	return err
-}
-
 // sendKitty uploads the photo to the terminal, once per day and only when the
 // photo is what the reader is about to see. The payload is megabytes - a 565KB
 // source jpeg becomes 5MB of base64 - and the sextant art, which is what most
@@ -451,8 +416,7 @@ func (m *Model) sendKitty() tea.Cmd {
 	}
 	a, out := m.apod, m.Session
 	maxW, maxH := m.pixelBox()
-	x := &xfer{}
-	m.xfer = x
+	m.sending = true
 	return func() tea.Msg {
 		img, err := a.Decode()
 		if err != nil {
@@ -469,25 +433,14 @@ func (m *Model) sendKitty() tea.Cmd {
 		for _, c := range chunks {
 			total += len(c)
 		}
-		x.total.Store(int64(total))
-		// Paced, one chunk at a time. The point is not the lock - a megabyte
-		// fits inside ssh's channel window, so the write returns long before
-		// the bytes land and nothing is ever blocked on it. The point is the
-		// queue: dumped in one go, the whole picture sits in the pipe ahead of
-		// every frame that comes after it, and the screen is dead until the
-		// client has chewed through it. Fed in slowly, frames can get in
-		// between. The pause caps this at a few MB/s, which is faster than the
-		// links that need the help and costs the fast ones a fraction of a
-		// second - during which the picture is not on screen anyway.
-		for i, c := range chunks {
-			if i > 0 {
-				time.Sleep(chunkPause)
-			}
-			if err := writeBulk(out, c); err != nil {
+		// One chunk at a time, and how fast is the connection's business: a
+		// terminal on the other end of this process wants them as quickly as
+		// they will go, one at the far end of a network wants them paced.
+		for _, c := range chunks {
+			if _, err := io.WriteString(out, c); err != nil {
 				slog.Warn("failed to send image to the terminal", "error", err)
 				return kittyMsg{apod: a}
 			}
-			x.sent.Add(int64(len(c)))
 		}
 		slog.Info("sent photo", "date", a.Date, "box", fmt.Sprintf("%dx%d", maxW, maxH), "bytes", total)
 		return kittyMsg{apod: a, ok: true}
@@ -526,14 +479,7 @@ var (
 	keyCopySelection = key.NewBinding(key.WithKeys("ctrl+shift+c"))
 )
 
-var dbgViews, dbgSpins atomic.Int64
-
 func (m *Model) View() tea.View {
-	if _, running := m.xfer.progress(); running {
-		if n := dbgViews.Add(1); n%20 == 0 {
-			slog.Info("dbg", "viewsDuringXfer", n, "spins", dbgSpins.Load())
-		}
-	}
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeAllMotion
@@ -678,7 +624,7 @@ func (m *Model) viewAPOD() string {
 		// day with a picture does, top-aligned, rather than floating to the
 		// middle of the screen with the link and help bar tucked under it
 		txt.Width(contentW).Height(bodyH).AlignVertical(lipgloss.Top).Render(body),
-		txt.Width(contentW).Align(lipgloss.Center).Render(m.viewProgress()),
+		txt.Width(contentW).Align(lipgloss.Center).Render(m.viewSending()),
 		txt.Width(contentW).Align(lipgloss.Center).Render(linkBlock),
 		txt.Width(contentW).Align(lipgloss.Center).Render(helpView),
 	)
@@ -1078,22 +1024,16 @@ func (m *Model) viewExplanation(width, maxHeight int) string {
 	return m.vp.View()
 }
 
-// progressWidth is the bar itself, not counting its label.
-const progressWidth = 24
-
-// viewProgress draws the photo's journey to the terminal in the row already
-// reserved between the body and the link, so nothing moves when it appears or
-// when it goes. Empty whenever nothing is in flight, which is nearly always.
-func (m *Model) viewProgress() string {
-	frac, running := m.xfer.progress()
-	if !running {
+// viewSending is the banner shown while the photo is on its way. It goes out
+// ahead of the picture's own bytes - the encoding takes long enough for the
+// frame carrying it to be well clear first - so it is on screen for as long as
+// the client spends taking the photo in. It takes a row that was already
+// reserved, so nothing moves when it comes or goes.
+func (m *Model) viewSending() string {
+	if !m.sending {
 		return ""
 	}
-	done := int(frac * progressWidth)
-	return m.txtMuted().Render("sending photo ") +
-		m.txtYellow().Render(strings.Repeat("\u2501", done)) +
-		m.txtSuperMuted().Render(strings.Repeat("\u2501", progressWidth-done)) +
-		m.txtMuted().Render(fmt.Sprintf(" %3.0f%%", frac*100))
+	return m.txtMuted().Render("[ loading photo\u2026 ]")
 }
 
 // loadingLine is the spinner + label, shared by both loading phases.
