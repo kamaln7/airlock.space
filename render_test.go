@@ -2,6 +2,8 @@ package airlockspace
 
 import (
 	"bytes"
+
+	"github.com/charmbracelet/x/ansi"
 	"image"
 	"image/color"
 	"image/png"
@@ -30,6 +32,23 @@ func TestRenderSextant(t *testing.T) {
 	}
 	if !strings.Contains(out, "\x1b[38;2;") {
 		t.Fatal("expected truecolor escape sequences in output")
+	}
+
+	// a picture far larger than the art it becomes is cut down before chafa
+	// sees it; the geometry it produces must be unchanged by that
+	big := image.NewNRGBA(image.Rect(0, 0, 2000, 3000))
+	for y := 0; y < 3000; y += 7 {
+		for x := 0; x < 2000; x += 7 {
+			big.Set(x, y, color.NRGBA{R: uint8(x), G: uint8(y), B: 200, A: 255})
+		}
+	}
+	out = renderSextant(big, 40, 25, chafa.CHAFA_CANVAS_MODE_TRUECOLOR)
+	lines = strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 25 {
+		t.Fatalf("large source rendered %d rows, want 25", len(lines))
+	}
+	if w := ansi.StringWidth(lines[0]); w != 40 {
+		t.Errorf("large source rendered %d columns, want 40", w)
 	}
 }
 

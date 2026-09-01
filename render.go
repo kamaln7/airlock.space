@@ -39,8 +39,27 @@ func canvasMode(p colorprofile.Profile) chafa.CanvasMode {
 	}
 }
 
+// A sextant cell is two sub-cells across and three down, so that is all the
+// detail chafa can use. Oversampling a little gives it something to average
+// per sub-cell; past that the pixels are thrown away inside it. Measured on a
+// 61x38 render: three is two and a half times quicker than handing over the
+// whole picture, six is a wash, and twelve is three times slower.
+const sextantOversample = 3
+
 // renderSextant converts img to sextant-glyph art of exactly cols x rows cells.
 func renderSextant(img image.Image, cols, rows int, mode chafa.CanvasMode) string {
+	// Down to what the art can actually show, first. Handing chafa the whole
+	// picture means copying it into a fresh buffer at full size - seven
+	// megabytes for a photograph, to draw a few hundred cells - and then
+	// making chafa throw almost all of it away. A 45x28 render needs 270x252.
+	if w, h := fitImage(img.Bounds().Dx(), img.Bounds().Dy(),
+		cols*2*sextantOversample, rows*3*sextantOversample); w >= 1 && h >= 1 &&
+		(w < img.Bounds().Dx() || h < img.Bounds().Dy()) {
+		small := image.NewNRGBA(image.Rect(0, 0, w, h))
+		xdraw.ApproxBiLinear.Scale(small, small.Bounds(), img, img.Bounds(), xdraw.Src, nil)
+		img = small
+	}
+
 	bounds := img.Bounds()
 	rgba := image.NewNRGBA(bounds)
 	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)

@@ -144,12 +144,19 @@ type msgSpin struct{}
 // is not one the reader wants.
 const resendGain = 1.5
 
-// resizeSettle is how long the window must hold still before the photo is
-// encoded for it.
-const resizeSettle = 750 * time.Millisecond
+// How long the window must hold still before each kind of picture is made
+// again. Art is a decode and a pass through chafa, so it comes back quickly;
+// the photo is hundreds of kilobytes down the wire, so it waits longer.
+const (
+	artSettle   = 200 * time.Millisecond
+	photoSettle = 750 * time.Millisecond
+)
 
 // msgResized says a resize has stopped moving, if no later one has started.
-type msgResized struct{ gen int }
+type msgResized struct {
+	gen   int
+	photo bool // the longer settle, the one the photo waits for
+}
 
 func spinTick() tea.Cmd {
 	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
@@ -177,15 +184,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizing = true
 		m.resizeGen++
 		gen := m.resizeGen
-		cmds = append(cmds, requestCellSize, tea.Tick(resizeSettle, func(time.Time) tea.Msg {
-			return msgResized{gen}
-		}))
+		cmds = append(cmds, requestCellSize,
+			tea.Tick(artSettle, func(time.Time) tea.Msg { return msgResized{gen, false} }),
+			tea.Tick(photoSettle, func(time.Time) tea.Msg { return msgResized{gen, true} }))
 	case msgResized:
-		// dragging a window edge fires these by the dozen and the photo is
-		// megabytes, so nothing is sent until the dragging stops
-		if msg.gen == m.resizeGen {
-			m.resizing = false
+		// dragging a window edge fires these by the dozen; only the settle
+		// belonging to the last one does anything
+		if msg.gen != m.resizeGen {
+			break
+		}
+		if msg.photo {
 			cmds = append(cmds, m.sendKitty())
+		} else {
+			m.resizing = false
 		}
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {

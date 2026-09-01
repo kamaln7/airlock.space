@@ -972,14 +972,23 @@ func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
 		t.Fatalf("five resizes counted as %d", latest)
 	}
 
-	m.Update(msgResized{gen: latest - 3}) // an earlier one, long overtaken
+	m.Update(msgResized{gen: latest - 3, photo: true}) // long overtaken
 	if m.sentW != 0 {
 		t.Error("an overtaken resize sent a photo")
 	}
 
+	// the short settle brings the art back but sends no photo
 	m.Update(msgResized{gen: latest})
+	if m.resizing {
+		t.Error("the art settle did not release the picture")
+	}
+	if m.sentW != 0 {
+		t.Error("the art settle sent a photo; that is the longer one's job")
+	}
+
+	m.Update(msgResized{gen: latest, photo: true})
 	if m.sentW == 0 {
-		t.Error("the resize settled and nothing was sent")
+		t.Error("the photo settled and nothing was sent")
 	}
 }
 
