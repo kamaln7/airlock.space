@@ -13,12 +13,12 @@ import (
 	"unicode"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kamaln7/airlock.space/apod"
-	"github.com/muesli/reflow/wordwrap"
 	"github.com/samber/lo"
 	lom "github.com/samber/lo/mutable"
 )
@@ -104,6 +104,9 @@ type Model struct {
 	art              string
 	explCache        string // memoized processed explanation
 	explCacheFor     *apod.APOD
+	vp               viewport.Model // the scrolling explanation
+	vpFor            *apod.APOD     // the day its content was set from
+	vpWidth          int
 	placedCols       int // current kitty virtual placement size
 	placedRows       int
 	imageLoading     bool
@@ -192,6 +195,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.apod != nil {
 				cmds = append(cmds, m.copyLink())
 			}
+		default:
+			// anything this app has no use for scrolls the explanation, where
+			// the explanation is what is on screen
+			if m.explanationOnScreen() {
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		}
+	case tea.MouseWheelMsg:
+		if m.explanationOnScreen() {
+			m.vp, _ = m.vp.Update(msg)
 		}
 	case tea.MouseMotionMsg:
 		m.mouseX, m.mouseY = msg.X, msg.Y
@@ -487,7 +502,7 @@ func (m *Model) viewAPOD() string {
 		apodWidth = totalWidth
 		freeWidth = totalWidth
 	}
-	apodView := m.viewAPODText(apodWidth, !showImage)
+	apodView := m.viewAPODText(apodWidth)
 	helpView := m.viewHelp()
 
 	freeHeight := m.Height - 2 - countLines(helpView) // -2 for top margin + last row
@@ -513,9 +528,14 @@ func (m *Model) viewAPOD() string {
 	} else {
 		asciiArt := m.decorArt(max(0, freeWidth-8), freeHeight) // -8 for the gap
 
+		// the explanation gets whatever height the fixed furniture leaves it
+		linkBlock := m.viewLinkLine()
+		chrome := countLines(apodView) + countLines(linkBlock) + countLines(helpView)
+		explBlock := m.viewExplanation(apodWidth, max(1, m.Height-chrome-2))
+
 		// max-width container centered in the viewport (margin: 0 auto):
 		// text column and art side by side at their natural widths
-		textCol := apodView + helpView
+		textCol := apodView + explBlock + "\n\n" + linkBlock + "\n" + helpView
 		content := textCol
 		if asciiArt != "" {
 			content = lipgloss.JoinHorizontal(lipgloss.Top,
@@ -595,6 +615,13 @@ func (m *Model) helpKeys() []key.Binding {
 			}
 			keys = append(keys, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
 		}
+	}
+	// only worth saying when there is more explanation than is on screen
+	if m.explanationOnScreen() && m.scrolls() {
+		keys = append(keys, key.NewBinding(
+			key.WithKeys("down", "j", glyphDown),
+			key.WithHelp(glyphDown, "scroll"),
+		))
 	}
 	return append(keys, keyCopy, keyQuit) // q quit stays last
 }
@@ -799,6 +826,91 @@ func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 	return helpKey, link
 }
 
+// the scrollbar is drawn rather than composed: the viewport offers a left
+// gutter, but the bar belongs on the right, away from the text.
+const (
+	scrollTrack = "\u2502"
+	scrollThumb = "\u2588"
+	scrollWidth = 2 // the bar and the space before it
+)
+
+// explKeyMap is the viewport's keys with this app's own removed. The stock map
+// takes left/right and h/l, which are the day arrows, and f, which is
+// fullscreen; scrolling would quietly eat all three.
+func explKeyMap() viewport.KeyMap {
+	return viewport.KeyMap{
+		Up:           key.NewBinding(key.WithKeys("up", "k")),
+		Down:         key.NewBinding(key.WithKeys("down", "j", glyphDown)),
+		PageUp:       key.NewBinding(key.WithKeys("pgup", "b")),
+		PageDown:     key.NewBinding(key.WithKeys("pgdown", "space")),
+		HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
+		HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
+	}
+}
+
+// syncViewport points the viewport at the day on screen, re-wrapping only when
+// the day or the width it is wrapped to changes. Its height follows the
+// content up to maxHeight, so a short explanation stays a short block.
+func (m *Model) syncViewport(width, maxHeight int) {
+	if m.vpFor != m.apod || m.vpWidth != width {
+		// wrapped here rather than by the viewport: SoftWrap breaks mid-word
+		m.vp.KeyMap = explKeyMap()
+		m.vp.SetWidth(width)
+		m.vp.SetContent(lipgloss.Wrap(m.explanationText(), width, ""))
+		m.vp.SetYOffset(0) // a new day starts at its beginning
+		m.vpFor, m.vpWidth = m.apod, width
+	}
+	m.vp.SetHeight(max(1, min(m.vp.TotalLineCount(), maxHeight)))
+}
+
+// explanationOnScreen reports whether the explanation is the thing being
+// read, which is what decides whether scroll input belongs to it.
+func (m *Model) explanationOnScreen() bool {
+	return m.State == StateAPOD && !m.showingImage()
+}
+
+// scrolls reports whether the explanation has more than fits on screen.
+func (m *Model) scrolls() bool {
+	return m.vp.TotalLineCount() > m.vp.Height()
+}
+
+// scrollbar draws the track and thumb beside the explanation, nothing at all
+// when it all fits.
+func (m *Model) scrollbar() string {
+	h, total := m.vp.Height(), m.vp.TotalLineCount()
+	if total <= h || h < 1 {
+		return ""
+	}
+	thumb := max(1, h*h/total)
+	pos := 0
+	if span := total - h; span > 0 {
+		pos = m.vp.YOffset() * (h - thumb) / span
+	}
+	var b strings.Builder
+	for i := range h {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if i >= pos && i < pos+thumb {
+			b.WriteString(m.txtMuted().Render(scrollThumb))
+		} else {
+			b.WriteString(m.txtSuperMuted().Render(scrollTrack))
+		}
+	}
+	return b.String()
+}
+
+// viewExplanation is the scrolling explanation with its scrollbar. The bar's
+// columns are reserved whether or not it is showing, so the text does not
+// reflow the moment it becomes scrollable.
+func (m *Model) viewExplanation(width, maxHeight int) string {
+	m.syncViewport(max(1, width-scrollWidth), maxHeight)
+	if sb := m.scrollbar(); sb != "" {
+		return lipgloss.JoinHorizontal(lipgloss.Top, m.vp.View(), " ", sb)
+	}
+	return m.vp.View()
+}
+
 // loadingLine is the spinner + label, shared by both loading phases.
 func (m *Model) loadingLine() string {
 	return m.spinnerView() + " " + m.txtMuted().Render("loading...")
@@ -929,6 +1041,7 @@ func (m *Model) imageArea(cols, rows int) string {
 const (
 	glyphPrev = "\u2190"
 	glyphNext = "\u2192"
+	glyphDown = "\u2193"
 )
 
 // navDate is the compact form the day arrows label their day with. The day on
@@ -1002,9 +1115,9 @@ func (m *Model) txtArrow(key string) lipgloss.Style {
 	return m.txtMuted()
 }
 
-// viewAPODText renders the header, the day line, and optionally the
-// explanation.
-func (m *Model) viewAPODText(width int, writeExplanation bool) string {
+// viewAPODText renders the header block: the app name, the calendar and the
+// title. The explanation is its own scrolling block - see viewExplanation.
+func (m *Model) viewAPODText(width int) string {
 	var s strings.Builder
 
 	header := m.txtMuted().Render("🌌 Astronomy Picture of the Day")
@@ -1026,13 +1139,6 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	s.WriteString("\n\n")
 	s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width) + "\n" + title))
 	s.WriteString("\n\n")
-
-	if writeExplanation {
-		s.WriteString(txt.Render(wordwrap.String(m.explanationText(), width)))
-		s.WriteString("\n\n")
-		s.WriteString(m.viewLinkLine())
-		s.WriteString("\n")
-	}
 
 	return s.String()
 }

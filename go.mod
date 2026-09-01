@@ -12,7 +12,6 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/kamaln7/resolvable/v2 v2.0.0-20260821172050-22a78c0b5c82
-	github.com/muesli/reflow v0.3.0
 	github.com/peteretelej/nasa v1.0.0
 	github.com/ploMP4/chafa-go v0.5.0
 	github.com/samber/lo v1.53.0

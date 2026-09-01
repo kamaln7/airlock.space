@@ -55,29 +55,60 @@ func TestVideoDayNoImageToggle(t *testing.T) {
 	}
 }
 
-// an explanation taller than the viewport scrolls off the top; hit-testing
-// must follow the rows actually on screen, or hover/click land on the wrong row
-func TestHitTestWhenFrameOverflows(t *testing.T) {
-	m := &Model{Width: 80, Height: 24,
-		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
-			Explanation: strings.Repeat("some words about space. ", 60),
-			ApodDate:    time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)}}}
-	m.State = StateAPOD
+// a long explanation used to run off the bottom of the frame with no way to
+// reach the rest of it. It scrolls now, and the keys it scrolls with must be
+// only the ones this app has no use for.
+func TestLongExplanationScrolls(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = strings.Repeat("some words about space. ", 60)
+	m.Height = 30
+
+	if n := countLines(m.baseView()); n > m.Height {
+		t.Errorf("frame is %d lines on a %d-row terminal", n, m.Height)
+	}
+	if !m.scrolls() {
+		t.Fatalf("%d lines in a %d-line box does not scroll",
+			m.vp.TotalLineCount(), m.vp.Height())
+	}
+	if m.scrollbar() == "" {
+		t.Error("no scrollbar on a scrolling explanation")
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.vp.YOffset() == 0 {
+		t.Fatal("down did not scroll the explanation")
+	}
+
+	// the viewport's stock keymap claims left/right, h/l and f, which are this
+	// app's day arrows and fullscreen. They must reach the app, not the text.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if !m.date.Equal(day(2026, 8, 19)) {
+		t.Errorf("left scrolled instead of stepping a day back; date = %v", m.date)
+	}
+	at := m.vp.YOffset()
+	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
+	if m.vp.YOffset() != at {
+		t.Error("f or h paged the explanation; they are fullscreen and prev-day")
+	}
+}
+
+// a frame taller than the terminal shows its tail, so hit-testing has to
+// follow the rows actually on screen. The explanation scrolls now, so this
+// only arises on a terminal too short for the header furniture itself.
+func TestFrameLineFollowsTheVisibleRows(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	m.Height = 4
 
 	lines := strings.Split(m.baseView(), "\n")
 	if len(lines) <= m.Height {
-		t.Fatal("fixture no longer overflows the viewport")
+		t.Fatalf("fixture no longer overflows: %d lines in %d rows", len(lines), m.Height)
 	}
-	link := m.apod.Link()
-	frameRow := slices.IndexFunc(lines, func(l string) bool {
-		return strings.Contains(ansi.Strip(l), link)
-	})
-	screenRow := frameRow - (len(lines) - m.Height)
-	if _, ok := m.hitTest(40, screenRow); !ok {
-		t.Errorf("no link hit at screen row %d (frame row %d)", screenRow, frameRow)
-	}
-	if _, ok := m.hitTest(40, frameRow); ok {
-		t.Error("link hit at the unscrolled frame row, which is off screen")
+	off := len(lines) - m.Height
+	for y := range m.Height {
+		if got, want := m.frameLine(y), ansi.Strip(lines[y+off]); got != want {
+			t.Fatalf("screen row %d = %q; want frame row %d, %q", y, got, y+off, want)
+		}
 	}
 }
 
