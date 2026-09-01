@@ -1,15 +1,18 @@
 package airlockspace
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"image"
 	"image/draw"
+	"image/png"
 	"strings"
 	"sync"
 
 	"github.com/muesli/termenv"
 	chafa "github.com/ploMP4/chafa-go"
+	xdraw "golang.org/x/image/draw"
 )
 
 // fitCells fits an image of imgW x imgH pixels into a box of cells, preserving
@@ -91,6 +94,27 @@ func cachedSextant(date string, decode func() (image.Image, error), cols, rows i
 	renderCache.entries[key] = s
 	renderCache.Unlock()
 	return s, nil
+}
+
+// kittyPNG encodes the photo for transmission, scaled to fit maxW x maxH
+// device pixels - never more than the terminal can actually display.
+//
+// The resampling pays for itself twice. CatmullRom is the nicest of the
+// practical kernels going down, and it also removes the source jpeg's noise,
+// which png cannot compress: fitting an 800x1024 source into 1400x900 drops
+// 23% of the pixels and 62% of the bytes.
+func kittyPNG(img image.Image, maxW, maxH int) ([]byte, error) {
+	b := img.Bounds()
+	// only ever down: upscaling here would just cost bytes, and the terminal
+	// scales the placement to the cell box anyway
+	if w, h := fitImage(b.Dx(), b.Dy(), maxW, maxH); w >= 1 && h >= 1 && (w < b.Dx() || h < b.Dy()) {
+		dst := image.NewRGBA(image.Rect(0, 0, w, h))
+		xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
+		img = dst
+	}
+	var buf bytes.Buffer
+	err := png.Encode(&buf, img)
+	return buf.Bytes(), err
 }
 
 // kitty graphics protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/

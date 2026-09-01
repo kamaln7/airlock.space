@@ -54,6 +54,11 @@ type Model struct {
 	Profile       termenv.Profile
 	KittyGraphics bool      // client can render real images via the kitty graphics protocol
 	Session       io.Writer // raw session output, for kitty image transmission
+	// WidthPixels and HeightPixels are the terminal's drawable size in device
+	// pixels, which ssh reports alongside the cell grid. Zero when the client
+	// does not send it.
+	WidthPixels  int
+	HeightPixels int
 
 	State            State
 	imgOrExplanation bool // true -> img, false -> explanation
@@ -316,6 +321,18 @@ func (m *Model) loadImage() tea.Cmd {
 	}
 }
 
+// pixelBox is the largest the photo could ever be drawn: the whole terminal,
+// which is what fullscreen uses. ssh carries the real device-pixel size, so on
+// a hidpi screen this is the hidpi box and the photo stays sharp.
+// ponytail: 10x20 per cell when the client sends no pixel size, and the cell
+// size is read once - a font size change mid-session goes unnoticed.
+func (m *Model) pixelBox() (w, h int) {
+	if m.WidthPixels > 0 && m.HeightPixels > 0 {
+		return m.WidthPixels, m.HeightPixels
+	}
+	return m.Width * 10, m.Height * 20
+}
+
 // sendKitty uploads the photo to the terminal, once per day and only when the
 // photo is what the reader is about to see. The payload is megabytes - a 565KB
 // source jpeg becomes 5MB of base64 - and the sextant art, which is what most
@@ -326,16 +343,24 @@ func (m *Model) sendKitty() tea.Cmd {
 		return nil
 	}
 	a, out := m.apod, m.Session
+	maxW, maxH := m.pixelBox()
 	return func() tea.Msg {
-		png, err := a.PNGBytes()
+		img, err := a.Decode()
+		if err != nil {
+			slog.Warn("failed to decode image for kitty", "error", err)
+			return kittyMsg{apod: a}
+		}
+		png, err := kittyPNG(img, maxW, maxH)
 		if err != nil {
 			slog.Warn("failed to prepare png for kitty", "error", err)
 			return kittyMsg{apod: a}
 		}
-		if _, err := io.WriteString(out, kittyTransmit(png)); err != nil {
+		wire := kittyTransmit(png)
+		if _, err := io.WriteString(out, wire); err != nil {
 			slog.Warn("failed to send image to the terminal", "error", err)
 			return kittyMsg{apod: a}
 		}
+		slog.Info("sent photo", "date", a.Date, "box", fmt.Sprintf("%dx%d", maxW, maxH), "bytes", len(wire))
 		return kittyMsg{apod: a, ok: true}
 	}
 }

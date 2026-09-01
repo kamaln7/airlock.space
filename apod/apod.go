@@ -9,7 +9,7 @@ import (
 	"image"
 	_ "image/gif"  // decoders for whatever NASA posts: registering them here is
 	_ "image/jpeg" // this package's business, not a dependency's to do by accident
-	"image/png"
+	_ "image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,9 +39,6 @@ type APOD struct {
 	// caches: an error would send every new session through the fetch again.
 	// Decode on demand and discard: a decoded APOD is tens of MB, the box has 512.
 	ImageBytes resolvable.V[[]byte]
-	// PNGBytes is a PNG transcode for the kitty graphics protocol, only
-	// materialized when a kitty-capable client connects.
-	PNGBytes resolvable.V[[]byte]
 
 	// ImageSize is set once ImageBytes has resolved.
 	ImageSize image.Point
@@ -143,9 +140,6 @@ func newAPOD(img *nasa.Image) *APOD {
 	a := &APOD{Image: img}
 	a.ImageBytes = resolvable.New(a.getImageBytes,
 		resolvable.Retry(3, nil),
-		resolvable.CacheForever(),
-	).WithBackgroundContext()
-	a.PNGBytes = resolvable.New(a.getPNGBytes,
 		resolvable.CacheForever(),
 	).WithBackgroundContext()
 	return a
@@ -355,28 +349,6 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("reading image body: %w", err)
 	}
 	return body, nil
-}
-
-func (a *APOD) getPNGBytes(_ context.Context) ([]byte, error) {
-	byt, err := a.ImageBytes()
-	if err != nil {
-		return nil, err
-	}
-	if len(byt) == 0 {
-		return nil, errNotAnImage
-	}
-	if http.DetectContentType(byt) == "image/png" {
-		return byt, nil
-	}
-	img, _, err := image.Decode(bytes.NewReader(byt))
-	if err != nil {
-		return nil, fmt.Errorf("decoding image: %w", err)
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, fmt.Errorf("encoding png: %w", err)
-	}
-	return buf.Bytes(), nil
 }
 
 // Link is the APOD page for this image on nasa.gov.

@@ -164,6 +164,8 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		Profile:       profile,
 		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram),
 		Session:       out,
+		WidthPixels:   pty.Window.WidthPixels,
+		HeightPixels:  pty.Window.HeightPixels,
 	}
 	opts := append(bubbletea.MakeOptions(s),
 		tea.WithOutput(out),
