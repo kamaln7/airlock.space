@@ -761,6 +761,66 @@ func artLogReset() {
 	artLog.seen, artLog.order = map[string][]int{}, nil
 }
 
+// the picture is uploaded in pieces so frames can get onto the wire between
+// them; each piece has to be a complete, correctly keyed escape
+func TestKittyChunksAreWellFormed(t *testing.T) {
+	png := make([]byte, 20000) // enough for several chunks
+	chunks := kittyChunks(png)
+	if len(chunks) < 3 {
+		t.Fatalf("got %d chunks, want several", len(chunks))
+	}
+	for i, c := range chunks {
+		if !strings.HasPrefix(c, "\x1b_G") || !strings.HasSuffix(c, "\x1b\\") {
+			t.Errorf("chunk %d is not a complete escape: %q", i, c[:min(30, len(c))])
+		}
+	}
+	if !strings.HasPrefix(chunks[0], "\x1b_Ga=t,f=100,i=42,q=2,m=1;") {
+		t.Errorf("first chunk does not open the transmission: %q", chunks[0][:40])
+	}
+	for i, c := range chunks[1 : len(chunks)-1] {
+		if !strings.HasPrefix(c, "\x1b_Gm=1;") {
+			t.Errorf("middle chunk %d is not a continuation: %q", i+1, c[:20])
+		}
+	}
+	if !strings.HasPrefix(chunks[len(chunks)-1], "\x1b_Gm=0;") {
+		t.Error("the last chunk does not close the transmission")
+	}
+}
+
+// the bar reports the upload while it is running and nothing once it is not
+func TestProgressBarTracksTheUpload(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	if got := m.viewProgress(); got != "" {
+		t.Errorf("a bar with no upload in flight: %q", got)
+	}
+
+	m.xfer = &xfer{}
+	m.xfer.total.Store(1000)
+	m.xfer.sent.Store(250)
+	bar := ansi.Strip(m.viewProgress())
+	if !strings.Contains(bar, "25%") {
+		t.Errorf("bar at a quarter reads %q", bar)
+	}
+	if !strings.Contains(bar, "sending photo") {
+		t.Errorf("bar does not say what it is doing: %q", bar)
+	}
+
+	m.xfer.sent.Store(1000)
+	if got := m.viewProgress(); got != "" {
+		t.Errorf("bar still showing after the upload landed: %q", got)
+	}
+
+	// and it takes a row that was already reserved, so nothing moves
+	m.xfer = nil
+	quiet := countLines(m.baseView())
+	m.xfer = &xfer{}
+	m.xfer.total.Store(1000)
+	m.xfer.sent.Store(500)
+	if busy := countLines(m.baseView()); busy != quiet {
+		t.Errorf("frame is %d rows while sending, %d otherwise", busy, quiet)
+	}
+}
+
 // a slow day that the user has already navigated away from must not land
 func TestStaleDayResponseIsDropped(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))

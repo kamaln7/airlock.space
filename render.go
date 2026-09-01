@@ -125,11 +125,19 @@ func kittyPNG(img image.Image, maxW, maxH int) ([]byte, error) {
 // kitty graphics protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/
 const kittyImageID = 42
 
-// kittyTransmit uploads PNG data under kittyImageID without displaying it.
-// Safe to write at any time; it draws nothing.
-func kittyTransmit(pngData []byte) string {
+// kittyChunks splits PNG data into the escape-wrapped pieces that upload it
+// under kittyImageID without displaying it. Returned as pieces rather than one
+// string so the caller can write them one at a time and let a frame out
+// between: a megabyte written in a single call holds the connection for
+// seconds, and nothing else can reach the terminal while it does.
+//
+// The protocol's rule is that no other *graphics* escape may arrive between
+// the chunks of one image. Nothing emits one while an upload is in flight -
+// the placement is only written once the upload has landed, and until then the
+// view is drawing sextant art.
+func kittyChunks(pngData []byte) []string {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
-	var s strings.Builder
+	var chunks []string
 	first := true
 	for len(b64) > 0 {
 		chunk := b64
@@ -142,9 +150,9 @@ func kittyTransmit(pngData []byte) string {
 			ctrl = fmt.Sprintf("a=t,f=100,i=%d,q=2,", kittyImageID) + ctrl
 			first = false
 		}
-		s.WriteString("\x1b_G" + ctrl + ";" + chunk + "\x1b\\")
+		chunks = append(chunks, "\x1b_G"+ctrl+";"+chunk+"\x1b\\")
 	}
-	return s.String()
+	return chunks
 }
 
 // kittyVirtualPlacement creates or replaces the virtual placement that maps
