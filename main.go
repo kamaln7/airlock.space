@@ -632,7 +632,7 @@ func (m *Model) viewAPOD() string {
 		// day with a picture does, top-aligned, rather than floating to the
 		// middle of the screen with the link and help bar tucked under it
 		txt.Width(contentW).Height(bodyH).AlignVertical(lipgloss.Top).Render(body),
-		txt.Width(contentW).Align(lipgloss.Center).Render(m.viewSending()),
+		"",
 		txt.Width(contentW).Align(lipgloss.Center).Render(linkBlock),
 		txt.Width(contentW).Align(lipgloss.Center).Render(helpView),
 	)
@@ -653,7 +653,7 @@ func (m *Model) imagePane(w, h int) string {
 		}
 		return txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
 	}
-	return txt.Width(w).Align(lipgloss.Center).Render(m.imageArea(w, h))
+	return txt.Width(w).Align(lipgloss.Center).Render(m.picture(w, h))
 }
 
 // viewLinkLine is the clickable URL shown under the explanation, with inline
@@ -1046,16 +1046,47 @@ func worthMentioning(t time.Time) bool {
 	return !t.IsZero() && time.Since(t) >= loadingDelay
 }
 
-// viewSending is the banner shown while the photo is on its way. It goes out
-// ahead of the picture's own bytes - the encoding takes long enough for the
-// frame carrying it to be well clear first - so it is on screen for as long as
-// the client spends taking the photo in. It takes a row that was already
-// reserved, so nothing moves when it comes or goes.
-func (m *Model) viewSending() string {
-	if !worthMentioning(m.photoSince) {
-		return ""
+// picture is the image area with the sending notice laid over the middle of it
+// while the real photo is on its way.
+//
+// Not held back the tenth of a second a spinner is: that delay asks how long
+// we have been busy, and here that is the wrong clock. The sending is over in
+// a moment - the bytes are in the pipe, not on the screen - while the client
+// spends whatever it spends drawing megabytes. The notice is written ahead of
+// them and taken away after, so what governs how long it shows is the picture
+// travelling, and the answer is never nothing. Sextant art is what is on screen until
+// it lands, so the notice goes on top of that rather than replacing it: the
+// reader keeps the picture and gains the reason it is about to change.
+func (m *Model) picture(w, h int) string {
+	art := m.imageArea(w, h)
+	if m.photoSince.IsZero() {
+		return art
 	}
-	return m.txtMuted().Render("[ loading photo\u2026 ]")
+	notice := m.txtYellow().Bold(true).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.color(colorMuted)).
+		Padding(0, 2).
+		Render("loading photo\u2026")
+
+	return overlayCenter(art, notice)
+}
+
+// overlayCenter lays over across the middle of base, keeping base's size and
+// what is around it. Spliced by hand, the way the selection highlight is:
+// lipgloss's cell canvas drew one layer or the other here, never both.
+func overlayCenter(base, over string) string {
+	lines := strings.Split(base, "\n")
+	rows := strings.Split(over, "\n")
+	bw, ow := lipgloss.Width(base), lipgloss.Width(over)
+	if ow > bw || len(rows) > len(lines) {
+		return over // no room to lay it over, and it is the more useful of the two
+	}
+	top, left := (len(lines)-len(rows))/2, (bw-ow)/2
+	for i, r := range rows {
+		line := lines[top+i]
+		lines[top+i] = ansi.Cut(line, 0, left) + r + ansi.TruncateLeft(line, left+ow, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // loadingLine is the spinner + label, shared by both loading phases.
@@ -1389,7 +1420,7 @@ func (m *Model) viewFullscreen() string {
 		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center,
 			lipgloss.JoinHorizontal(lipgloss.Top,
 				gutter.Align(lipgloss.Left).PaddingLeft(helpGutterPad).Render(stacked),
-				txt.Width(imgW).Render(m.imageArea(imgW, imgH)),
+				txt.Width(imgW).Render(m.picture(imgW, imgH)),
 				gutter.Render(""),
 			))
 	}
@@ -1399,7 +1430,7 @@ func (m *Model) viewFullscreen() string {
 	// ANSI-heavy image row
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.Place(m.Width, m.Height-1, lipgloss.Center, lipgloss.Center,
-			m.imageArea(m.Width, m.Height-1)),
+			m.picture(m.Width, m.Height-1)),
 		txt.Width(m.Width).Align(lipgloss.Center).Render(strings.TrimSpace(m.viewHelp())),
 	)
 }

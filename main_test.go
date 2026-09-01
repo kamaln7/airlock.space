@@ -805,42 +805,69 @@ func TestKittyChunksAreWellFormed(t *testing.T) {
 	}
 }
 
-// the banner goes out ahead of the photo's own bytes, and takes a row that
-// was already there, so nothing moves when it comes or goes
-func TestSendingBannerTakesAReservedRow(t *testing.T) {
-	m := besideImage(t, 130, 30)
-	if got := m.viewSending(); got != "" {
-		t.Errorf("banner with nothing being sent: %q", got)
-	}
-	quiet := countLines(m.baseView())
-
-	// raised by the send itself, before a byte of the photo goes out
+// the notice sits over the middle of the picture, on top of the art rather
+// than in place of it, and only once the send is slow enough to be worth
+// mentioning
+func TestSendingNoticeSitsOverThePicture(t *testing.T) {
+	m := besideImage(t, 130, 34)
 	m.preferArt, m.kittyReady = false, false
 	if cmd := m.sendKitty(); cmd == nil {
 		t.Fatal("nothing to send")
 	}
 	if m.photoSince.IsZero() {
-		t.Fatal("sending the photo did not start the clock on the banner")
+		t.Fatal("sending the photo did not start the clock")
 	}
-	// but not while it might still be a flash
-	if got := m.viewSending(); got != "" {
-		t.Errorf("banner up straight away: %q", got)
+	// up at once, unlike a spinner: what decides how long it shows is the
+	// picture travelling, which is never nothing, and it is written ahead of
+	// those bytes so it is on screen for all of it
+	busy := m.baseView()
+	if !strings.Contains(ansi.Strip(busy), "loading photo") {
+		t.Fatal("no notice while the photo is on its way")
 	}
-	m.photoSince = time.Now().Add(-loadingDelay)
-	if !strings.Contains(ansi.Strip(m.viewSending()), "loading photo") {
-		t.Errorf("banner does not say what it is doing: %q", m.viewSending())
+	rows := strings.Split(ansi.Strip(busy), "\n")
+	var at int
+	for i, r := range rows {
+		if strings.Contains(r, "loading photo") {
+			at = i
+		}
 	}
-	if !strings.Contains(ansi.Strip(m.baseView()), "loading photo") {
-		t.Error("banner is not on the frame")
-	}
-	if busy := countLines(m.baseView()); busy != quiet {
-		t.Errorf("frame is %d rows while sending, %d otherwise", busy, quiet)
+	if at < 4 || at > len(rows)-4 {
+		t.Errorf("notice is on row %d of %d; it should be in the middle", at, len(rows))
 	}
 
-	// and lowered when the photo lands
 	m.Update(kittyMsg{apod: m.apod, ok: true})
-	if got := m.viewSending(); got != "" {
-		t.Errorf("banner still up after the photo arrived: %q", got)
+	quiet := m.baseView()
+	if strings.Contains(ansi.Strip(quiet), "loading photo") {
+		t.Error("notice still up after the photo arrived")
+	}
+	// laid over the picture, not squeezed in beside it: the frame is the same
+	// size either way
+	if a, b := countLines(quiet), countLines(busy); a != b {
+		t.Errorf("frame is %d rows while sending, %d otherwise", b, a)
+	}
+}
+
+// the notice goes over the picture, not instead of it: everything around it
+// has to survive, which is what the cell canvas would not do
+func TestOverlayCenterKeepsWhatIsAround(t *testing.T) {
+	base := strings.TrimSuffix(strings.Repeat("..........\n", 7), "\n")
+	got := strings.Split(overlayCenter(base, "[XX]"), "\n")
+
+	if len(got) != 7 {
+		t.Fatalf("overlay changed the height: %d rows, want 7", len(got))
+	}
+	if got[3] != "...[XX]..." {
+		t.Errorf("middle row is %q; want the overlay centered in what was there", got[3])
+	}
+	for i, l := range got {
+		if i != 3 && l != ".........." {
+			t.Errorf("row %d became %q; only the middle should change", i, l)
+		}
+	}
+
+	// taller than what it would cover: the notice is the more useful of the two
+	if got := overlayCenter("one row", "a\nb\nc"); got != "a\nb\nc" {
+		t.Errorf("overlay too big for its base returned %q", got)
 	}
 }
 
