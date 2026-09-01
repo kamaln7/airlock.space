@@ -136,7 +136,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.State = StateLink
 			}
 		case key.Matches(msg, keyFullscreen):
-			if !m.imageOK {
+			// no fullscreen from the explanation view
+			if !m.imageOK || (m.State == StateAPOD && !m.imgOrExplanation) {
 				break
 			}
 			if m.State == StateFullscreen {
@@ -363,18 +364,19 @@ func (m *Model) viewAPOD() string {
 			),
 		)
 	} else {
-		asciiArt := m.decorArt(freeWidth, freeHeight)
+		asciiArt := m.decorArt(max(0, freeWidth-8), freeHeight) // -8 for the gap
 
+		// max-width container centered in the viewport (margin: 0 auto):
+		// text column and art side by side at their natural widths
 		textCol := apodView + helpView
-		content := lipgloss.JoinHorizontal(lipgloss.Top,
-			textCol,
-			m.Style.Width(freeWidth).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
-		)
-		// vertically center the whole block; tall windows otherwise leave a
-		// wall of dead space below
-		return m.Style.Margin(0, 1).Render(
-			lipgloss.Place(totalWidth, m.Height, lipgloss.Left, lipgloss.Center, content),
-		)
+		content := textCol
+		if asciiArt != "" {
+			content = lipgloss.JoinHorizontal(lipgloss.Top,
+				textCol,
+				m.Style.MarginLeft(8).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
+			)
+		}
+		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
 	}
 }
 
@@ -417,7 +419,10 @@ func (m *Model) helpKeys() []key.Binding {
 		eDesc = "explanation"
 	}
 	keyExpl := key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc))
-	keys := []key.Binding{keyExpl, keyLink, keyFullscreen, keyQuit}
+	keys := []key.Binding{keyExpl, keyLink, keyQuit}
+	if m.imgOrExplanation {
+		keys = slices.Insert(keys, 2, keyFullscreen)
+	}
 	// image/ascii toggle only where the image is on screen; action-only label
 	if m.kittySent && m.imgOrExplanation {
 		pDesc := "ascii"
