@@ -470,13 +470,13 @@ func (m *Model) baseView() string {
 }
 
 // the reading box. 72 columns is the measure the text column has always used;
-// the height cap keeps a maximised terminal from stretching the explanation
-// into one enormous column, and sits above the longest explanation NASA
-// posts, so it rarely bites. The picture gets a column of its own the same
+// the height cap only stops a maximised terminal drawing one absurd column,
+// and sits well above the longest explanation NASA posts, so in practice the
+// terminal runs out of rows before the cap does. The picture gets a column of its own the same
 // width at most, so neither crowds the other on a very wide screen.
 const (
 	explMaxWidth  = 72
-	explMaxHeight = 24
+	explMaxHeight = 40
 	imageMaxWidth = 72
 	imageMinWidth = 24 // narrower than this and a picture is not worth the room
 	paneGap       = 4
@@ -522,16 +522,16 @@ func (m *Model) viewAPOD() string {
 	// the picture's column is sized to the picture, not the other way round: a
 	// tall one is bound by the rows available and would otherwise sit in the
 	// middle of a column twice its width
-	imgW := room
-	if m.imageOK {
-		imgW, _ = fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, room, bodyH, m.cellAspect())
-	}
-	beside := room >= imageMinWidth && imgW >= imageMinWidth && !(m.imageOK && m.imageIsWide())
-	if m.imageLoading {
-		// hold the column open so the page does not jump when it arrives
-		beside, imgW = room >= imageMinWidth, room
-	}
 	hasImage := m.imageOK || m.imageLoading
+	imgW, imgH := room, bodyH // while loading, hold the column open so the
+	if m.imageOK {            // page does not jump when the picture arrives
+		imgW, imgH = fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, room, bodyH, m.cellAspect())
+	}
+	// the gate is horizontal room only. A tall picture is bound by the rows,
+	// not the columns, so it fits to a narrow strip - and stacking it would
+	// hand it half the rows and make it smaller still. Only a wide one, which
+	// wants the width the text wants, is better off above the text.
+	beside := hasImage && room >= imageMinWidth && !(m.imageOK && m.imageIsWide())
 
 	contentW := textW
 	switch {
@@ -548,7 +548,7 @@ func (m *Model) viewAPOD() string {
 	case beside:
 		text := m.explBlock(textW, min(bodyH, explMaxHeight), imgW+paneGap)
 		body = lipgloss.JoinHorizontal(lipgloss.Top,
-			m.imagePane(imgW, max(bodyH, lipgloss.Height(text))),
+			m.imagePane(imgW, imgH),
 			strings.Repeat(" ", paneGap),
 			text)
 	default:
@@ -564,7 +564,11 @@ func (m *Model) viewAPOD() string {
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		m.viewAPODText(contentW),
-		txt.Width(contentW).Render(body),
+		// the body holds the rows it was given whether or not it fills them,
+		// so a video day - explanation and nothing beside it - sits where a
+		// day with a picture does, top-aligned, rather than floating to the
+		// middle of the screen with the link and help bar tucked under it
+		txt.Width(contentW).Height(bodyH).AlignVertical(lipgloss.Top).Render(body),
 		"",
 		txt.Width(contentW).Align(lipgloss.Center).Render(linkBlock),
 		txt.Width(contentW).Align(lipgloss.Center).Render(helpView),
@@ -575,14 +579,15 @@ func (m *Model) viewAPOD() string {
 	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// imagePane is the picture centered in a box of cells, or the spinner while
-// there is not one yet.
+// imagePane is the picture in a box of its own height, never a taller one:
+// padding it to the rows available would centre it, which puts blank rows
+// above and below the picture and drops its top edge below the text beside it.
+// Only the spinner, which has no size of its own, gets the full box.
 func (m *Model) imagePane(w, h int) string {
-	box := txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center)
 	if !m.imageOK {
-		return box.Render(m.loadingLine())
+		return txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
 	}
-	return box.Render(m.imageArea(w, h))
+	return txt.Width(w).Align(lipgloss.Center).Render(m.imageArea(w, h))
 }
 
 // viewLinkLine is the clickable URL shown under the explanation, with inline
@@ -630,20 +635,12 @@ func (m *Model) copySelection() tea.Cmd {
 func (m *Model) helpKeys() []key.Binding {
 	switch m.State {
 	case StateFullscreen:
-		return []key.Binding{keyFullscreen}
+		return append([]key.Binding{keyFullscreen}, append(m.photoKey(), keyQuit)...)
 	}
 	// the day arrows live in the header now, not here
 	var keys []key.Binding
 	if m.imageOK {
-		keys = append(keys, keyFullscreen)
-		// image/ascii toggle only where there is an image; action-only label
-		if m.KittyGraphics {
-			pDesc := "ascii"
-			if m.preferArt {
-				pDesc = "image"
-			}
-			keys = append(keys, key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", pDesc)))
-		}
+		keys = append(append(keys, keyFullscreen), m.photoKey()...)
 	}
 	// only worth saying when there is more explanation than is on screen
 	if m.explanationOnScreen() && m.scrolls() {
@@ -653,6 +650,19 @@ func (m *Model) helpKeys() []key.Binding {
 		))
 	}
 	return append(keys, keyCopy, keyQuit) // q quit stays last
+}
+
+// photoKey is the photo/ascii toggle, offered wherever the picture is and the
+// client can draw a real one. Its label names the action, not both sides.
+func (m *Model) photoKey() []key.Binding {
+	if !m.KittyGraphics || !m.imageOK {
+		return nil
+	}
+	desc := "ascii"
+	if m.preferArt {
+		desc = "image"
+	}
+	return []key.Binding{key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", desc))}
 }
 
 // viewHelp renders the help bar. Items under the mouse are highlighted; Update

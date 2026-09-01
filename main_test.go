@@ -362,6 +362,12 @@ func besideImage(t *testing.T, w, h int) *Model {
 // explanation's, or dragging over it copies the picture beside it.
 func TestExplanationSelectableBesideTheImage(t *testing.T) {
 	t.Run("beside", func(t *testing.T) { explSelectable(t, besideImage(t, 150, 34)) })
+	t.Run("video day", func(t *testing.T) {
+		m := besideImage(t, 130, 30)
+		m.imageOK, m.kittyReady = false, false
+		m.apod.ImageSize = image.Point{}
+		explSelectable(t, m)
+	})
 	t.Run("stacked under a wide picture", func(t *testing.T) {
 		m := besideImage(t, 150, 34)
 		m.apod.ImageSize = image.Point{X: 3000, Y: 900}
@@ -469,6 +475,102 @@ func TestGoodbyeCarriesArt(t *testing.T) {
 	}
 	if rows == 0 {
 		t.Errorf("no art rows in the goodbye:\n%s", out)
+	}
+}
+
+// the picture's box is its own size, so its top edge meets the text's beside
+// it and no rows are left blank above or below it
+func TestPictureTopAlignsWithText(t *testing.T) {
+	m := besideImage(t, 150, 40)
+	firstText, firstImg, lastImg := -1, -1, -1
+	for i, l := range strings.Split(m.baseView(), "\n") {
+		s := ansi.Strip(l)
+		if firstText < 0 && strings.Contains(s, "Some words") {
+			firstText = i
+		}
+		if strings.ContainsRune(s, 0x10EEEE) { // a kitty placeholder cell
+			if firstImg < 0 {
+				firstImg = i
+			}
+			lastImg = i
+		}
+	}
+	if firstImg < 0 || firstText < 0 {
+		t.Fatalf("picture row %d, text row %d: expected both", firstImg, firstText)
+	}
+	if firstImg != firstText {
+		t.Errorf("picture starts on row %d, text on row %d; their tops must meet", firstImg, firstText)
+	}
+	// and the placement is exactly as tall as the picture, not the box
+	_, imgH := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, imageMaxWidth,
+		lastImg-firstImg+1, m.cellAspect())
+	if got := lastImg - firstImg + 1; got != imgH {
+		t.Errorf("picture occupies %d rows, fits %d: it is being padded", got, imgH)
+	}
+}
+
+// a video day has no picture, but the page keeps its shape: the explanation
+// stays top-aligned where it would be beside one, and the box is sized for
+// the text alone rather than for a picture that is not there
+func TestVideoDayKeepsThePageShape(t *testing.T) {
+	rowOf := func(m *Model, needle string) int {
+		for i, l := range strings.Split(m.baseView(), "\n") {
+			if strings.Contains(ansi.Strip(l), needle) {
+				return i
+			}
+		}
+		return -1
+	}
+	photo := besideImage(t, 130, 30)
+	video := besideImage(t, 130, 30)
+	video.imageOK, video.kittyReady = false, false
+	video.apod.ImageSize = image.Point{}
+
+	for _, needle := range []string{"Some words", "apod.nasa.gov", "q quit"} {
+		a, b := rowOf(photo, needle), rowOf(video, needle)
+		if a < 0 || a != b {
+			t.Errorf("%q is on row %d with a picture and row %d without", needle, a, b)
+		}
+	}
+
+	// measured, not read from explCol: a block that forgets to indent agrees
+	// with the column it recorded and still renders in the wrong place
+	col := -1
+	for _, l := range strings.Split(video.baseView(), "\n") {
+		s := ansi.Strip(l)
+		if i := strings.Index(s, "Some words"); i >= 0 {
+			col = ansi.StringWidth(s[:i])
+			break
+		}
+	}
+	left := col
+	right := video.Width - (col + video.explWidth + scrollWidth)
+	if left-right > 1 || right-left > 1 {
+		t.Errorf("video day is off centre: %d columns to the left, %d to the right", left, right)
+	}
+}
+
+// fullscreen is still a place you can act from: the picture toggle and the way
+// out belong on its help bar too
+func TestFullscreenHelpKeys(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.State = StateFullscreen
+
+	var keys []string
+	for _, k := range m.helpKeys() {
+		keys = append(keys, k.Help().Key)
+	}
+	for _, want := range []string{"f", "p", "q"} {
+		if !slices.Contains(keys, want) {
+			t.Errorf("fullscreen help %v has no %q", keys, want)
+		}
+	}
+	// no picture, no picture toggle
+	m.KittyGraphics = false
+	for _, k := range m.helpKeys() {
+		if k.Help().Key == "p" {
+			t.Error("offered the photo toggle to a client that cannot draw one")
+		}
 	}
 }
 
