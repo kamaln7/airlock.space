@@ -871,35 +871,88 @@ func TestOverlayCenterKeepsWhatIsAround(t *testing.T) {
 	}
 }
 
-// the photo is encoded for the column it sits in, so going fullscreen has to
-// fetch a sharper one - and coming back must not fetch a blurrier one
-func TestFullscreenAsksForASharperPhoto(t *testing.T) {
-	m := besideImage(t, 200, 50)
-	m.cellW, m.cellH = 8, 20
-	m.preferArt, m.kittyReady = false, false
-
-	if cmd := m.sendKitty(); cmd == nil {
+// going fullscreen re-cuts the photo only when that is worth a second
+// transfer. On an ordinary terminal it is not: the box widens a lot but the
+// picture is bound by the rows, so it gains a twentieth and nobody sees it.
+func TestFullscreenOnlyResendsWhenItIsWorthIt(t *testing.T) {
+	ordinary := besideImage(t, 200, 50)
+	ordinary.cellW, ordinary.cellH = 8, 20
+	ordinary.preferArt, ordinary.kittyReady = false, false
+	if cmd := ordinary.sendKitty(); cmd == nil {
 		t.Fatal("no first send")
 	}
-	column := m.sentW * m.sentH
-	m.kittyReady = true
+	was := ordinary.sentW
+	ordinary.kittyReady = true
 
-	if cmd := m.sendKitty(); cmd != nil {
-		t.Error("sent the same photo again for the same box")
-	}
-
-	// pressing f has to be what asks for it, not a direct call
-	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
-	if m.State != StateFullscreen {
+	ordinary.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if ordinary.State != StateFullscreen {
 		t.Fatal("f did not go fullscreen")
 	}
-	if full := m.sentW * m.sentH; full <= column {
-		t.Errorf("fullscreen asked for %d pixels, the column had %d", full, column)
+	if ordinary.sentW != was {
+		t.Errorf("re-cut the photo from %d to %d wide, a %.2fx gain nobody can see",
+			was, ordinary.sentW, float64(ordinary.sentW)/float64(was))
 	}
 
-	m.kittyReady, m.State = true, StateAPOD
-	if cmd := m.sendKitty(); cmd != nil {
-		t.Error("sent a smaller photo on the way out of fullscreen")
+	// on a small terminal fullscreen really is a different picture, and it goes
+	small := besideImage(t, 80, 24)
+	small.cellW, small.cellH = 8, 16
+	small.preferArt, small.kittyReady = false, false
+	if cmd := small.sendKitty(); cmd == nil {
+		t.Fatal("no first send on the small terminal")
+	}
+	wasSmall := small.sentW
+	small.kittyReady = true
+
+	small.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if gain := float64(small.sentW) / float64(wasSmall); gain < resendGain {
+		t.Errorf("fullscreen kept a photo cut for a twelve-row column: %d -> %d (%.2fx)",
+			wasSmall, small.sentW, gain)
+	}
+
+	// and coming back never sends a smaller one
+	back := small.sentW
+	small.kittyReady = true
+	small.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if small.sentW != back {
+		t.Errorf("leaving fullscreen sent a smaller photo: %d -> %d", back, small.sentW)
+	}
+}
+
+// art costs a jpeg decode and a pass through chafa. A drag asks for a dozen
+// sizes nobody will look at, so the picture holds still until it stops - while
+// the page around it reflows at once.
+func TestResizeHoldsTheArtStill(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.KittyGraphics, m.kittyReady, m.preferArt = false, false, true
+
+	m.baseView()
+	drawn := m.lastArt
+	if drawn == "" {
+		t.Fatal("no art drawn to begin with")
+	}
+
+	m.Update(tea.WindowSizeMsg{Width: 118, Height: 28})
+	if !m.resizing {
+		t.Fatal("a resize did not start")
+	}
+	frame := m.baseView()
+	if m.lastArt != drawn {
+		t.Error("art was drawn again while the window was still moving")
+	}
+	if !strings.Contains(ansi.Strip(frame), m.apod.Title) {
+		t.Error("the page stopped reflowing too; only the picture should wait")
+	}
+	if m.clipped == "" {
+		t.Error("the picture vanished during the resize instead of holding")
+	}
+
+	m.Update(msgResized{gen: m.resizeGen})
+	if m.resizing {
+		t.Fatal("the resize never settled")
+	}
+	m.baseView()
+	if m.lastArt == drawn {
+		t.Error("art was not drawn again once the window stopped")
 	}
 }
 

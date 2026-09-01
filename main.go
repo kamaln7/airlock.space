@@ -111,6 +111,10 @@ type Model struct {
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
 	vpWidth        int
+	resizing       bool   // the window is still being dragged
+	lastArt        string // the art last drawn, to show while it is
+	clipKey        string // that art cut to a box, memoized across frames
+	clipped        string
 	sentW, sentH   int       // the pixel box the photo on screen was encoded for
 	resizeGen      int       // which resize the pending settle belongs to
 	daySince       time.Time // when the day on screen started loading
@@ -134,6 +138,11 @@ const (
 var spinnerFrames = []string{"🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"}
 
 type msgSpin struct{}
+
+// resendGain is how much bigger a box must be before the photo is cut again
+// for it. Below this the difference is not one the eye finds, and the transfer
+// is not one the reader wants.
+const resendGain = 1.5
 
 // resizeSettle is how long the window must hold still before the photo is
 // encoded for it.
@@ -165,6 +174,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Width = msg.Width
 		m.applyArtDefault()
 		// a resize can mean a new font size, and so a new cell
+		m.resizing = true
 		m.resizeGen++
 		gen := m.resizeGen
 		cmds = append(cmds, requestCellSize, tea.Tick(resizeSettle, func(time.Time) tea.Msg {
@@ -174,6 +184,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dragging a window edge fires these by the dozen and the photo is
 		// megabytes, so nothing is sent until the dragging stops
 		if msg.gen == m.resizeGen {
+			m.resizing = false
 			cmds = append(cmds, m.sendKitty())
 		}
 	case uv.CellSizeEvent:
@@ -461,11 +472,22 @@ func (m *Model) sendKitty() tea.Cmd {
 		return nil
 	}
 	maxW, maxH := m.photoBox()
-	if m.kittyReady && m.sentW >= maxW && m.sentH >= maxH {
-		return nil // the one already up there is at least this sharp
+	// Compared on the picture that comes out, not the box it goes in: going
+	// fullscreen widens the box a great deal while the picture stays bound by
+	// the rows, so the box says it grew threefold when the picture gains a
+	// twentieth. And only go again for one meaningfully sharper - fullscreen
+	// is worth about a third on an ordinary terminal, which is the page's
+	// twelve rows of chrome and nothing the eye finds, while the transfer is
+	// several hundred kilobytes, a wait, and a banner.
+	w, h := fitImage(m.apod.ImageSize.X, m.apod.ImageSize.Y, maxW, maxH)
+	if w > m.apod.ImageSize.X {
+		w, h = m.apod.ImageSize.X, m.apod.ImageSize.Y // never up
+	}
+	if m.kittyReady && (m.sentW == 0 || float64(w) < float64(m.sentW)*resendGain) {
+		return nil // one is already up there, and this would not better it
 	}
 	a, out := m.apod, m.Session
-	m.sentW, m.sentH = maxW, maxH
+	m.sentW, m.sentH = w, h
 	m.photoSince = time.Now()
 	return func() tea.Msg {
 		img, err := a.Decode()
@@ -1118,6 +1140,24 @@ func (m *Model) picture(w, h int) string {
 	return overlayCenter(art, notice)
 }
 
+// clipTo cuts art down to a box of cells, for showing a render made for some
+// other size while the window is still moving.
+func clipTo(art string, cols, rows int) string {
+	if art == "" {
+		return ""
+	}
+	lines := strings.Split(art, "\n")
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	for i, l := range lines {
+		if ansi.StringWidth(l) > cols {
+			lines[i] = ansi.Truncate(l, cols, "")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // overlayCenter lays over across the middle of base, keeping base's size and
 // what is around it. Spliced by hand, the way the selection highlight is:
 // lipgloss's cell canvas drew one layer or the other here, never both.
@@ -1303,12 +1343,31 @@ func (m *Model) imageArea(cols, rows int) string {
 		return kittyPlaceholders(c, r)
 	}
 
+	// while the window is still being dragged, draw nothing new: art costs a
+	// jpeg decode and a pass through chafa, and a drag asks for a dozen sizes
+	// nobody will look at. The one already drawn is shown, cut to the new box,
+	// until the dragging stops - the page itself reflows at once, it is only
+	// the picture that waits.
+	if m.resizing {
+		if s, ok := sextantCached(m.apod.Date, c, r, canvasMode(m.Profile)); ok {
+			return strings.TrimSuffix(s, "\n")
+		}
+		// memoized: a frame goes out for every mouse twitch as well as every
+		// resize, and cutting art down is escape-by-escape work - done afresh
+		// each frame it costs more than the drawing it is avoiding
+		if key := fmt.Sprintf("%dx%d", c, r); key != m.clipKey {
+			m.clipKey, m.clipped = key, clipTo(m.lastArt, c, r)
+		}
+		return m.clipped
+	}
+
 	s, err := cachedSextant(m.apod.Date, m.apod.Decode, c, r, canvasMode(m.Profile))
 	if err != nil {
 		slog.Warn("failed to render image", "error", err)
 		return m.txtMuted().Render("image unavailable :(")
 	}
-	return strings.TrimSuffix(s, "\n")
+	m.lastArt, m.clipKey = strings.TrimSuffix(s, "\n"), ""
+	return m.lastArt
 }
 
 // the arrow glyphs are keys as well as labels: clicking one dispatches it

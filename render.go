@@ -75,16 +75,27 @@ var renderCache = struct {
 	entries map[string]string
 }{entries: map[string]string{}}
 
+func sextantKey(date string, cols, rows int, mode chafa.CanvasMode) string {
+	return fmt.Sprintf("%s|%dx%d|%d", date, cols, rows, mode)
+}
+
+// sextantCached returns a render already in hand, and says whether there was
+// one. Drawing art costs a jpeg decode and a pass through chafa, so while the
+// window is still moving the answer to a miss is to wait, not to render.
+func sextantCached(date string, cols, rows int, mode chafa.CanvasMode) (string, bool) {
+	renderCache.Lock()
+	defer renderCache.Unlock()
+	s, ok := renderCache.entries[sextantKey(date, cols, rows, mode)]
+	return s, ok
+}
+
 // decodeFn matches apod.(*APOD).Decode: decode fresh, drop after render.
 func cachedSextant(date string, decode func() (image.Image, error), cols, rows int, mode chafa.CanvasMode) (string, error) {
-	key := fmt.Sprintf("%s|%dx%d|%d", date, cols, rows, mode)
+	key := sextantKey(date, cols, rows, mode)
 
-	renderCache.Lock()
-	if s, ok := renderCache.entries[key]; ok {
-		renderCache.Unlock()
+	if s, ok := sextantCached(date, cols, rows, mode); ok {
 		return s, nil
 	}
-	renderCache.Unlock()
 
 	img, err := decode()
 	if err != nil {
