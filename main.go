@@ -64,7 +64,7 @@ type Model struct {
 	photoToggled     bool // user overrode the art/photo default with the keybind
 	copiedRecently   bool
 	hoverKey         string // help bar item under the mouse
-	hoverLink        bool   // mouse is over the URL in the link view
+	hoverLink        bool   // mouse is over the URL under the explanation
 	mouseX           int    // last seen mouse position
 	mouseY           int
 	selAnchor        point // in-app text selection (mouse tracking eats the
@@ -86,7 +86,6 @@ type State int
 const (
 	StateLoading State = iota
 	StateAPOD
-	StateLink
 	StateFullscreen
 )
 
@@ -98,6 +97,13 @@ type msgSpin struct{}
 
 func spinTick() tea.Cmd {
 	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
+}
+
+// showingImage reports whether the image (or its spinner) is what the APOD
+// view is displaying. On a video day there is no image, so it is always the
+// explanation regardless of the toggle.
+func (m *Model) showingImage() bool {
+	return m.imgOrExplanation && (m.imageOK || m.imageLoading)
 }
 
 func (m *Model) spinnerView() string {
@@ -123,21 +129,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyQuit):
 			return m, tea.Quit
 		case key.Matches(msg, keyExplanation):
+			// nothing to toggle to on a video day: the explanation is all there is
+			if !m.imageOK && !m.imageLoading {
+				break
+			}
 			m.State = StateAPOD
 			m.imgOrExplanation = !m.imgOrExplanation
 			m.artKey = "" // reshuffle the decorative art, as before, on interaction
-		case key.Matches(msg, keyLink):
-			if m.apod == nil {
-				break
-			}
-			if m.State == StateLink {
-				m.State = StateAPOD
-			} else {
-				m.State = StateLink
-			}
 		case key.Matches(msg, keyFullscreen):
 			// no fullscreen from the explanation view
-			if !m.imageOK || (m.State == StateAPOD && !m.imgOrExplanation) {
+			if !m.imageOK || !m.imgOrExplanation {
 				break
 			}
 			if m.State == StateFullscreen {
@@ -266,10 +267,6 @@ func (m *Model) loadImage() tea.Cmd {
 }
 
 var (
-	keyLink = key.NewBinding(
-		key.WithKeys("l", "ctrl+l"),
-		key.WithHelp("l", "link"),
-	)
 	keyQuit = key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
@@ -289,15 +286,6 @@ var (
 	keyCopy = key.NewBinding(
 		key.WithKeys("c"),
 		key.WithHelp("c", "copy link"),
-	)
-	// contextual labels for the link view footer
-	keyLinkCopy = key.NewBinding(
-		key.WithKeys("c"),
-		key.WithHelp("c", "copy"),
-	)
-	keyLinkBack = key.NewBinding(
-		key.WithKeys("l", "ctrl+l"),
-		key.WithHelp("l", "back"),
 	)
 )
 
@@ -322,8 +310,6 @@ func (m *Model) baseView() string {
 		return m.viewLoading()
 	case StateAPOD:
 		return m.viewAPOD()
-	case StateLink:
-		return m.viewLink()
 	case StateFullscreen:
 		return m.viewFullscreen()
 	}
@@ -331,7 +317,7 @@ func (m *Model) baseView() string {
 }
 
 func (m *Model) viewAPOD() string {
-	showImage := m.imgOrExplanation && (m.imageOK || m.imageLoading)
+	showImage := m.showingImage()
 	totalWidth := m.Width - 2 // -2 for the margin
 	apodWidth := min(72, totalWidth)
 	freeWidth := totalWidth - apodWidth
@@ -380,19 +366,19 @@ func (m *Model) viewAPOD() string {
 	}
 }
 
-func (m *Model) viewLink() string {
+// viewLinkLine is the clickable URL shown under the explanation, with inline
+// copy feedback. Same row either way, so the layout doesn't jump.
+func (m *Model) viewLinkLine() string {
 	link := m.apod.Link()
-	linkText := link
+	st := m.txtMuted()
 	if m.hoverLink {
-		linkText = m.txtYellow().Underline(true).Render(link)
+		st = m.txtYellow().Underline(true)
 	}
-	hint := "" // blank line keeps the layout stable when "copied!" appears
+	line := st.Render(termenv.Hyperlink(link, link))
 	if m.copiedRecently {
-		hint = m.Style.Bold(true).Render("copied!")
+		line += m.Style.Bold(true).Render("  copied!")
 	}
-	// yellow applies to the link block only; the help bar keeps its own colors
-	content := m.txtYellow().Render("🔗 link to APOD:\n\n"+termenv.Hyperlink(link, linkText)) + "\n\n" + hint + "\n" + m.viewHelp()
-	return m.Style.Width(m.Width).Height(m.Height).Align(lipgloss.Center, lipgloss.Center).Render(content)
+	return line
 }
 
 type msgCopyExpired struct{}
@@ -408,23 +394,24 @@ func (m *Model) copyLink() tea.Cmd {
 // helpKeys returns the keybindings shown (and clickable) in the current state.
 func (m *Model) helpKeys() []key.Binding {
 	switch m.State {
-	case StateLink:
-		return []key.Binding{keyLinkCopy, keyLinkBack, keyQuit}
 	case StateFullscreen:
 		return []key.Binding{keyFullscreen}
 	}
-	// show only the action the key would perform, not both toggle sides
-	eDesc := "image"
-	if m.imgOrExplanation {
-		eDesc = "explanation"
+	keys := []key.Binding{keyCopy, keyQuit}
+	// no image to toggle to on a video day, so no e
+	if m.imageOK || m.imageLoading {
+		// show only the action the key would perform, not both toggle sides
+		eDesc := "image"
+		if m.showingImage() {
+			eDesc = "explanation"
+		}
+		keys = slices.Insert(keys, 0, key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc)))
 	}
-	keyExpl := key.NewBinding(key.WithKeys("e", "ctrl+e"), key.WithHelp("e", eDesc))
-	keys := []key.Binding{keyExpl, keyLink, keyQuit}
-	if m.imgOrExplanation {
-		keys = slices.Insert(keys, 2, keyFullscreen)
+	if m.showingImage() {
+		keys = slices.Insert(keys, len(keys)-1, keyFullscreen)
 	}
 	// image/ascii toggle only where the image is on screen; action-only label
-	if m.kittySent && m.imgOrExplanation {
+	if m.kittySent && m.showingImage() {
 		pDesc := "ascii"
 		if m.preferArt {
 			pDesc = "image"
@@ -482,7 +469,7 @@ func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 
 	// explanation view: text-column content matched against the actual
 	// title/explanation text, so gaps and decorations never highlight
-	if m.State == StateAPOD && !m.imgOrExplanation {
+	if m.State == StateAPOD && !m.showingImage() {
 		colStart := 1
 		colEnd := min(1+min(72, m.Width-2), ansi.StringWidth(line))
 		if colStart >= colEnd {
@@ -605,7 +592,7 @@ func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 			}
 		}
 	}
-	if m.State == StateLink && m.apod != nil {
+	if m.apod != nil {
 		start, end, ok := columnSpan(line, m.apod.Link())
 		link = ok && x >= start && x < end
 	}
@@ -774,6 +761,8 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 
 	if writeExplanation {
 		s.WriteString(txt.Render(wordwrap.String(m.explanationText(), width)))
+		s.WriteString("\n\n")
+		s.WriteString(m.viewLinkLine())
 		s.WriteString("\n")
 	}
 
