@@ -111,8 +111,9 @@ type Model struct {
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
 	vpWidth        int
-	sending        bool // the photo is on its way to the terminal
-	placedCols     int  // current kitty virtual placement size
+	daySince       time.Time // when the day on screen started loading
+	photoSince     time.Time // when the photo started on its way
+	placedCols     int       // current kitty virtual placement size
 	placedRows     int
 	imageLoading   bool
 	spinFrame      int
@@ -141,6 +142,7 @@ func (m *Model) spinnerView() string {
 }
 
 func (m *Model) Init() tea.Cmd {
+	m.daySince = time.Now()
 	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor, requestCellSize)
 }
 
@@ -268,7 +270,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyArtDefault()
 		cmds = append(cmds, m.sendKitty())
 	case kittyMsg:
-		m.sending = false
+		m.photoSince = time.Time{}
 		if msg.apod == m.apod {
 			m.kittyReady = msg.ok
 			m.placedCols, m.placedRows = 0, 0
@@ -323,6 +325,7 @@ func (m *Model) showDay(date time.Time) tea.Cmd {
 	}
 	m.date = date
 	m.State = StateLoading
+	m.daySince = time.Now()
 	return m.loadAPOD(date)
 }
 
@@ -416,7 +419,7 @@ func (m *Model) sendKitty() tea.Cmd {
 	}
 	a, out := m.apod, m.Session
 	maxW, maxH := m.pixelBox()
-	m.sending = true
+	m.photoSince = time.Now()
 	return func() tea.Msg {
 		img, err := a.Decode()
 		if err != nil {
@@ -506,6 +509,11 @@ func (m *Model) render() string {
 func (m *Model) baseView() string {
 	switch m.State {
 	case StateLoading:
+		if m.apod != nil && !worthMentioning(m.daySince) {
+			// hold the day already on screen: most are in hand and arrive in
+			// a millisecond, and a spinner between them is just a flicker
+			return m.viewAPOD()
+		}
 		return m.viewLoading()
 	case StateAPOD:
 		return m.viewAPOD()
@@ -640,6 +648,9 @@ func (m *Model) viewAPOD() string {
 // Only the spinner, which has no size of its own, gets the full box.
 func (m *Model) imagePane(w, h int) string {
 	if !m.imageOK {
+		if !worthMentioning(m.daySince) {
+			return txt.Width(w).Height(h).Render("") // cached: it is about to be here
+		}
 		return txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
 	}
 	return txt.Width(w).Align(lipgloss.Center).Render(m.imageArea(w, h))
@@ -1024,13 +1035,24 @@ func (m *Model) viewExplanation(width, maxHeight int) string {
 	return m.vp.View()
 }
 
+// loadingDelay is how long something may take before it is worth saying so.
+// Under it, a spinner or a banner is a flash and nothing more - the reader
+// sees a flicker where they should have seen the thing they asked for.
+const loadingDelay = 100 * time.Millisecond
+
+// worthMentioning reports whether work started at t has been going long enough
+// to be worth telling the reader about. Zero means nothing is running.
+func worthMentioning(t time.Time) bool {
+	return !t.IsZero() && time.Since(t) >= loadingDelay
+}
+
 // viewSending is the banner shown while the photo is on its way. It goes out
 // ahead of the picture's own bytes - the encoding takes long enough for the
 // frame carrying it to be well clear first - so it is on screen for as long as
 // the client spends taking the photo in. It takes a row that was already
 // reserved, so nothing moves when it comes or goes.
 func (m *Model) viewSending() string {
-	if !m.sending {
+	if !worthMentioning(m.photoSince) {
 		return ""
 	}
 	return m.txtMuted().Render("[ loading photo\u2026 ]")

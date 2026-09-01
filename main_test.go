@@ -819,9 +819,14 @@ func TestSendingBannerTakesAReservedRow(t *testing.T) {
 	if cmd := m.sendKitty(); cmd == nil {
 		t.Fatal("nothing to send")
 	}
-	if !m.sending {
-		t.Fatal("sending the photo did not raise the banner")
+	if m.photoSince.IsZero() {
+		t.Fatal("sending the photo did not start the clock on the banner")
 	}
+	// but not while it might still be a flash
+	if got := m.viewSending(); got != "" {
+		t.Errorf("banner up straight away: %q", got)
+	}
+	m.photoSince = time.Now().Add(-loadingDelay)
 	if !strings.Contains(ansi.Strip(m.viewSending()), "loading photo") {
 		t.Errorf("banner does not say what it is doing: %q", m.viewSending())
 	}
@@ -834,8 +839,31 @@ func TestSendingBannerTakesAReservedRow(t *testing.T) {
 
 	// and lowered when the photo lands
 	m.Update(kittyMsg{apod: m.apod, ok: true})
-	if m.sending {
-		t.Error("banner still up after the photo arrived")
+	if got := m.viewSending(); got != "" {
+		t.Errorf("banner still up after the photo arrived: %q", got)
+	}
+}
+
+// most days are already in hand and arrive in a millisecond. A spinner
+// between them is a flicker, so the day on screen holds until the new one is
+// actually slow.
+func TestFastDayDoesNotFlashASpinner(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.Update(tea.KeyPressMsg{Code: tea.KeyLeft}) // step back a day
+	if m.State != StateLoading {
+		t.Fatal("stepping back did not start a load")
+	}
+
+	if frame := ansi.Strip(m.baseView()); strings.Contains(frame, "loading") {
+		t.Error("a spinner appeared before the day had even been slow")
+	} else if !strings.Contains(frame, m.apod.Title) {
+		t.Error("the day on screen was dropped for a blank frame")
+	}
+
+	// once it really is slow, say so
+	m.daySince = time.Now().Add(-loadingDelay)
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading") {
+		t.Error("no spinner for a day that is genuinely taking its time")
 	}
 }
 
