@@ -111,6 +111,7 @@ type Model struct {
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
 	vpWidth        int
+	trueW, trueH   int    // the size the terminal last reported
 	resizing       bool   // the window is still being dragged
 	lastArt        string // the art last drawn, to show while it is
 	clipKey        string // that art cut to a box, memoized across frames
@@ -147,15 +148,28 @@ const resendGain = 1.5
 // How long the window must hold still before each kind of picture is made
 // again. Art is a decode and a pass through chafa, so it comes back quickly;
 // the photo is hundreds of kilobytes down the wire, so it waits longer.
+// Dragging a window edge fires a resize every few milliseconds, and each one
+// asks for work in a different weight class. So each waits for the dragging to
+// pause for as long as it costs: the page reflows almost at once, the art is a
+// pass through chafa, and the photo is hundreds of kilobytes down a wire.
 const (
-	artSettle   = 200 * time.Millisecond
-	photoSettle = 750 * time.Millisecond
+	layoutSettle = 100 * time.Millisecond
+	artSettle    = 250 * time.Millisecond
+	photoSettle  = 750 * time.Millisecond
+)
+
+type settleKind int
+
+const (
+	settleLayout settleKind = iota
+	settleArt
+	settlePhoto
 )
 
 // msgResized says a resize has stopped moving, if no later one has started.
 type msgResized struct {
-	gen   int
-	photo bool // the longer settle, the one the photo waits for
+	gen  int
+	kind settleKind
 }
 
 func spinTick() tea.Cmd {
@@ -177,26 +191,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.Height = msg.Height
-		m.Width = msg.Width
-		m.applyArtDefault()
-		// a resize can mean a new font size, and so a new cell
+		m.trueW, m.trueH = msg.Width, msg.Height
 		m.resizing = true
 		m.resizeGen++
 		gen := m.resizeGen
+		if m.Width == 0 || m.Height == 0 {
+			m.reflow() // the first size: there is no old page to hold
+		}
+		// a resize can also mean a new font size, and so a new cell
 		cmds = append(cmds, requestCellSize,
-			tea.Tick(artSettle, func(time.Time) tea.Msg { return msgResized{gen, false} }),
-			tea.Tick(photoSettle, func(time.Time) tea.Msg { return msgResized{gen, true} }))
+			tea.Tick(layoutSettle, func(time.Time) tea.Msg { return msgResized{gen, settleLayout} }),
+			tea.Tick(artSettle, func(time.Time) tea.Msg { return msgResized{gen, settleArt} }),
+			tea.Tick(photoSettle, func(time.Time) tea.Msg { return msgResized{gen, settlePhoto} }))
 	case msgResized:
-		// dragging a window edge fires these by the dozen; only the settle
-		// belonging to the last one does anything
+		// dragging a window edge fires these by the dozen; only the settles
+		// belonging to the last one do anything
 		if msg.gen != m.resizeGen {
 			break
 		}
-		if msg.photo {
-			cmds = append(cmds, m.sendKitty())
-		} else {
+		switch msg.kind {
+		case settleLayout:
+			m.reflow()
+		case settleArt:
 			m.resizing = false
+		case settlePhoto:
+			cmds = append(cmds, m.sendKitty())
 		}
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
@@ -359,6 +378,16 @@ type imageMsg struct {
 type kittyMsg struct {
 	apod *apod.APOD
 	ok   bool
+}
+
+// reflow takes the size the terminal last reported and lays the page out to
+// it. Held back a moment after a resize: the page is rebuilt from scratch on
+// every frame, and a drag would rebuild it for a hundred widths nobody reads.
+func (m *Model) reflow() {
+	if m.trueW > 0 && m.trueH > 0 {
+		m.Width, m.Height = m.trueW, m.trueH
+		m.applyArtDefault()
+	}
 }
 
 // showDay switches to a day, if there is one there: NASA has nothing before
@@ -580,6 +609,11 @@ func (m *Model) render() string {
 	view := m.baseView()
 	if m.selActive {
 		view = m.applySelection(view)
+	}
+	// laid out to the old size for a moment after a resize, so cut it to the
+	// real one rather than let long rows wrap into the next
+	if m.trueW > 0 && (m.trueW < m.Width || m.trueH < m.Height) {
+		view = clipTo(view, m.trueW, m.trueH)
 	}
 	return view
 }

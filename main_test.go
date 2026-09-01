@@ -931,24 +931,33 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 		t.Fatal("no art drawn to begin with")
 	}
 
-	m.Update(tea.WindowSizeMsg{Width: 118, Height: 28})
+	m.Update(tea.WindowSizeMsg{Width: 118, Height: 26})
 	if !m.resizing {
 		t.Fatal("a resize did not start")
 	}
-	frame := m.baseView()
-	if m.lastArt != drawn {
-		t.Error("art was drawn again while the window was still moving")
-	}
-	if !strings.Contains(ansi.Strip(frame), m.apod.Title) {
-		t.Error("the page stopped reflowing too; only the picture should wait")
-	}
-	if m.clipped == "" {
-		t.Error("the picture vanished during the resize instead of holding")
+	if m.Width != 130 {
+		t.Error("the page reflowed while the window was still moving")
 	}
 
-	m.Update(msgResized{gen: m.resizeGen})
+	// the page catches up first, and the art is still the old one, cut to fit
+	m.Update(msgResized{gen: m.resizeGen, kind: settleLayout})
+	if m.Width != 118 {
+		t.Fatalf("the page did not reflow on its settle: %d", m.Width)
+	}
+	frame := m.baseView()
+	if m.lastArt != drawn {
+		t.Error("art was drawn again before its own settle")
+	}
+	if m.clipped == "" {
+		t.Error("the picture vanished instead of holding its last shape")
+	}
+	if !strings.Contains(ansi.Strip(frame), m.apod.Title) {
+		t.Error("the page did not reflow with the rest")
+	}
+
+	m.Update(msgResized{gen: m.resizeGen, kind: settleArt})
 	if m.resizing {
-		t.Fatal("the resize never settled")
+		t.Fatal("the art settle did not release the picture")
 	}
 	m.baseView()
 	if m.lastArt == drawn {
@@ -956,37 +965,50 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 	}
 }
 
-// dragging a window edge fires resizes by the dozen; the photo is megabytes
+// dragging a window edge fires resizes by the dozen, and each kind of work
+// waits for the dragging to pause for as long as it costs
 func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
 	m := besideImage(t, 150, 40)
 	m.preferArt, m.photoToggled, m.kittyReady = false, true, false
 
+	was := m.Width
 	for i := range 5 {
-		m.Update(tea.WindowSizeMsg{Width: 150 + i, Height: 40})
+		m.Update(tea.WindowSizeMsg{Width: 120 + i, Height: 30})
 	}
 	if m.sentW != 0 {
 		t.Fatal("a photo went out mid-drag")
+	}
+	if m.Width != was {
+		t.Errorf("the page reflowed mid-drag, to %d", m.Width)
 	}
 	latest := m.resizeGen
 	if latest != 5 {
 		t.Fatalf("five resizes counted as %d", latest)
 	}
 
-	m.Update(msgResized{gen: latest - 3, photo: true}) // long overtaken
+	m.Update(msgResized{gen: latest - 3, kind: settlePhoto}) // long overtaken
 	if m.sentW != 0 {
 		t.Error("an overtaken resize sent a photo")
 	}
 
-	// the short settle brings the art back but sends no photo
-	m.Update(msgResized{gen: latest})
+	// each settle does its own share and no more
+	m.Update(msgResized{gen: latest, kind: settleLayout})
+	if m.Width != 124 {
+		t.Errorf("the page is laid out to %d after settling; want the last size, 124", m.Width)
+	}
+	if !m.resizing || m.sentW != 0 {
+		t.Error("the layout settle drew art or sent a photo; neither is its job")
+	}
+
+	m.Update(msgResized{gen: latest, kind: settleArt})
 	if m.resizing {
 		t.Error("the art settle did not release the picture")
 	}
 	if m.sentW != 0 {
-		t.Error("the art settle sent a photo; that is the longer one's job")
+		t.Error("the art settle sent a photo; that is the longest one's job")
 	}
 
-	m.Update(msgResized{gen: latest, photo: true})
+	m.Update(msgResized{gen: latest, kind: settlePhoto})
 	if m.sentW == 0 {
 		t.Error("the photo settled and nothing was sent")
 	}
