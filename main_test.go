@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/peteretelej/nasa"
 )
@@ -149,22 +150,89 @@ func TestDayNavigationStaysInRange(t *testing.T) {
 	}
 }
 
-func TestDayNavigationFooter(t *testing.T) {
-	shown := func(m *Model) string {
-		var s string
-		for _, k := range m.helpKeys() {
-			s += k.Help().Key
-		}
-		return s
-	}
-	if got := shown(testModel(t, day(2026, 8, 31))); strings.Contains(got, "→") {
+func TestDayNavigationInHeader(t *testing.T) {
+	nav := func(m *Model) string { return ansi.Strip(m.viewNav(100)) }
+
+	latest := testModel(t, day(2026, 8, 31))
+	if got := nav(latest); strings.Contains(got, "\u2192") {
 		t.Errorf("next-day offered on the latest day: %q", got)
 	}
-	if got := shown(testModel(t, day(2026, 8, 20))); !strings.Contains(got, "→") {
+	if got := nav(latest); !strings.Contains(got, "\u2190 Aug 30") {
+		t.Errorf("prev-day missing or mislabelled: %q", got)
+	}
+	if got := nav(testModel(t, day(2026, 8, 20))); !strings.Contains(got, "Aug 21 \u2192") {
 		t.Errorf("next-day missing on an older day: %q", got)
 	}
-	if got := shown(testModel(t, apod.First)); strings.Contains(got, "←") {
+	if got := nav(testModel(t, apod.First)); strings.Contains(got, "\u2190") {
 		t.Errorf("prev-day offered on the first APOD: %q", got)
+	}
+	// the day on screen keeps its year; browsing reaches back to 1995
+	if got := nav(latest); !strings.Contains(got, "Aug 31, 2026") {
+		t.Errorf("the day on screen is not dated in full: %q", got)
+	}
+	// and the footer no longer carries the arrows
+	for _, k := range testModel(t, day(2026, 8, 20)).helpKeys() {
+		if h := k.Help(); h.Key == "\u2190" || h.Key == "\u2192" {
+			t.Errorf("footer still offers %q", h.Key)
+		}
+	}
+}
+
+// wide: one row, arrows pinned to the edges of a navMaxWidth container so they
+// do not drift apart on a big terminal. tight: the three blocks wrap.
+func TestDayNavigationWrapsWhenTight(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20)) // a day with both arrows
+
+	wide := ansi.Strip(m.viewNav(200))
+	if strings.Contains(wide, "\n") {
+		t.Errorf("wrapped with room to spare:\n%s", wide)
+	}
+	if w := lipgloss.Width(wide); w != navMaxWidth {
+		t.Errorf("day line is %d wide; want it capped at %d", w, navMaxWidth)
+	}
+	if !strings.HasPrefix(wide, "\u2190") || !strings.HasSuffix(wide, "\u2192") {
+		t.Errorf("arrows are not on the container's edges: %q", wide)
+	}
+
+	rows := strings.Split(ansi.Strip(m.viewNav(30)), "\n")
+	if len(rows) != 3 {
+		t.Fatalf("tight day line is %d rows, want 3:\n%s", len(rows), strings.Join(rows, "\n"))
+	}
+	// each block keeps its date once it has a row to itself
+	if !strings.Contains(rows[0], "\u2190 Aug 19") || !strings.Contains(rows[2], "Aug 21 \u2192") {
+		t.Errorf("wrapped rows lost their dates: %q", rows)
+	}
+	// and the arrows are still clickable where they wrapped to
+	if got := m.navHit(rows[2], 2); got != "\u2192" {
+		t.Errorf("navHit on the wrapped next-day row = %q", got)
+	}
+}
+
+// the arrows only moved; clicking one on the header row must still navigate
+func TestHeaderArrowClickNavigates(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	label := "\u2190 Aug 30"
+
+	lines := strings.Split(m.baseView(), "\n")
+	row := slices.IndexFunc(lines, func(l string) bool {
+		return strings.Contains(ansi.Strip(l), label)
+	})
+	if row < 0 {
+		t.Fatal("no day arrow on the frame")
+	}
+	start, end, _ := columnSpan(ansi.Strip(lines[row]), label)
+
+	if got, _ := m.hitTest((start+end)/2, row); got != "\u2190" {
+		t.Fatalf("hitTest on the arrow = %q; want the prev-day key", got)
+	}
+	// the whole label is the target, not just the glyph
+	if got, _ := m.hitTest(end-1, row); got != "\u2190" {
+		t.Errorf("hitTest on the arrow's date = %q; want the prev-day key", got)
+	}
+
+	m.Update(tea.MouseClickMsg{X: (start + end) / 2, Y: row, Button: tea.MouseLeft})
+	if !m.date.Equal(day(2026, 8, 30)) {
+		t.Errorf("clicking the prev-day arrow moved to %v; want 2026-08-30", m.date)
 	}
 }
 

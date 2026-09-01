@@ -393,12 +393,12 @@ func (m *Model) sendKitty() tea.Cmd {
 var (
 	// the arrow glyphs are keys too, so clicking the footer item dispatches them
 	keyPrevDay = key.NewBinding(
-		key.WithKeys("left", "h", "\u2190"),
-		key.WithHelp("\u2190", "prev day"),
+		key.WithKeys("left", "h", glyphPrev),
+		key.WithHelp(glyphPrev, "prev day"),
 	)
 	keyNextDay = key.NewBinding(
-		key.WithKeys("right", "l", "\u2192"),
-		key.WithHelp("\u2192", "next day"),
+		key.WithKeys("right", "l", glyphNext),
+		key.WithHelp(glyphNext, "next day"),
 	)
 	keyQuit = key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
@@ -559,15 +559,8 @@ func (m *Model) helpKeys() []key.Binding {
 	case StateFullscreen:
 		return []key.Binding{keyFullscreen}
 	}
+	// the day arrows live in the header now, not here
 	var keys []key.Binding
-	if m.apod != nil {
-		if m.date.After(apod.First) {
-			keys = append(keys, keyPrevDay)
-		}
-		if m.date.Before(m.latest) {
-			keys = append(keys, keyNextDay)
-		}
-	}
 	// no image to toggle to on a video day, so no e
 	if m.imageOK || m.imageLoading {
 		// show only the action the key would perform, not both toggle sides
@@ -751,8 +744,25 @@ func (m *Model) isHelpLine(line string) bool {
 	return matches >= 2
 }
 
-// hitTest resolves what's under the mouse in one frame render: a help bar key
-// (or "") and whether the link URL is hovered.
+// navHit reports which day arrow, if any, sits at column x of a stripped frame
+// line. The whole label is the target, not just the glyph.
+func (m *Model) navHit(line string, x int) string {
+	prev, next := m.dayArrows()
+	for _, it := range []struct{ key, label string }{{glyphPrev, prev}, {glyphNext, next}} {
+		if it.label == "" {
+			continue
+		}
+		if start, end, ok := columnSpan(line, it.label); ok && x >= start && x < end {
+			return it.key
+		}
+	}
+	return ""
+}
+
+// hitTest resolves what's under the mouse in one frame render: a key to
+// dispatch (or "") and whether the link URL is hovered. Both the help bar and
+// the header's day arrows answer with the key they stand for, so a click on
+// either is dispatched the same way.
 func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 	line := m.frameLine(y)
 	if m.isHelpLine(line) {
@@ -763,6 +773,9 @@ func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 				break
 			}
 		}
+	}
+	if helpKey == "" {
+		helpKey = m.navHit(line, x)
 	}
 	if m.apod != nil {
 		start, end, ok := columnSpan(line, m.apod.Link())
@@ -898,11 +911,87 @@ func (m *Model) imageArea(cols, rows int) string {
 	return strings.TrimSuffix(s, "\n")
 }
 
-// viewAPODText renders the header, date, title, and optionally the explanation.
-// When the width allows, the title shares the header row (flexbox-style);
-// otherwise it gets its own centered block below.
+// the arrow glyphs are keys as well as labels: clicking one dispatches it
+const (
+	glyphPrev = "\u2190"
+	glyphNext = "\u2192"
+)
+
+// navDate is the compact form the day arrows label their day with. The day on
+// screen keeps its year: browsing reaches back to 1995, where "Jun 16" alone
+// would say very little.
+const navDate = "Jan 2"
+
+// navMaxWidth caps the day line. Justified to the full width of a wide
+// terminal the arrows would sit half a screen apart, so they are pinned to the
+// edges of a centered container instead - the text column's own max width.
+const navMaxWidth = 72
+
+// navGap is the least blank space between an arrow and the day it frames.
+const navGap = 2
+
+// dayArrows returns the labels for the days either side of the one on screen,
+// empty where there is no such day.
+func (m *Model) dayArrows() (prev, next string) {
+	if m.apod == nil {
+		return "", ""
+	}
+	if m.date.After(apod.First) {
+		prev = glyphPrev + " " + m.date.AddDate(0, 0, -1).Format(navDate)
+	}
+	if m.date.Before(m.latest) {
+		next = m.date.AddDate(0, 0, 1).Format(navDate) + " " + glyphNext
+	}
+	return prev, next
+}
+
+// viewNav is the header's day line: the day on screen and its title, with the
+// days either side of it to step to.
+//
+// One row while it fits: the arrows pinned to the edges of a navMaxWidth
+// container with the day centered between them, which is justify-between with
+// the middle item centered rather than merely evenly spaced - so the title
+// holds the centre whatever the arrows either side of it are called. Too tight
+// for that and the three blocks wrap onto rows of their own, as flex-wrap
+// would. The caller centers whatever comes back.
+func (m *Model) viewNav(width int) string {
+	prev, next := m.dayArrows()
+	center := m.txtMuted().Render(m.apod.ApodDate.Format("Jan 2, 2006")) + " " +
+		hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
+
+	inner := min(navMaxWidth, width)
+	pw, cw, nw := lipgloss.Width(prev), lipgloss.Width(center), lipgloss.Width(next)
+	start := (inner - cw) / 2 // where the day sits, centered in the container
+
+	if start >= pw+navGap && inner-start-cw >= nw+navGap {
+		return m.txtArrow(glyphPrev).Render(prev) +
+			strings.Repeat(" ", start-pw) + center +
+			strings.Repeat(" ", inner-start-cw-nw) + m.txtArrow(glyphNext).Render(next)
+	}
+
+	rows := make([]string, 0, 3)
+	if prev != "" {
+		rows = append(rows, m.txtArrow(glyphPrev).Render(prev))
+	}
+	rows = append(rows, center)
+	if next != "" {
+		rows = append(rows, m.txtArrow(glyphNext).Render(next))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// txtArrow styles one day arrow, lit up under the mouse like a help bar item.
+// An absent day has no label and must not pick up an escape sequence.
+func (m *Model) txtArrow(key string) lipgloss.Style {
+	if m.hoverKey == key {
+		return m.txtYellow().Underline(true)
+	}
+	return m.txtMuted()
+}
+
+// viewAPODText renders the header, the day line, and optionally the
+// explanation.
 func (m *Model) viewAPODText(width int, writeExplanation bool) string {
-	txt := txt
 	var s strings.Builder
 
 	header := m.txtMuted().Render("🌌 Astronomy Picture of the Day")
@@ -915,26 +1004,13 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 		return s.String()
 	}
 
-	dateLine := m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly))
-	title := hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
-
-	// center the title relative to the viewport, not the space next to the
-	// header; overlay works when the centered span clears the header
-	titleStart := (width - lipgloss.Width(title)) / 2
-	if titleStart >= lipgloss.Width(header)+4 {
-		s.WriteString(header + strings.Repeat(" ", titleStart-lipgloss.Width(header)) + title)
-		s.WriteString("\n")
-		s.WriteString(dateLine)
-		s.WriteString("\n")
-		s.WriteString("\n")
-	} else {
-		s.WriteString(header)
-		s.WriteString("\n")
-		s.WriteString(dateLine)
-		s.WriteString("\n\n\n")
-		s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(title))
-		s.WriteString("\n\n")
-	}
+	// the day line gets a row of its own: with a date on each arrow it is too
+	// wide to share one with the header, so the flexbox the title used to do
+	// would only ever have collapsed - and jumped between days as it did
+	s.WriteString(header)
+	s.WriteString("\n\n")
+	s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width)))
+	s.WriteString("\n\n")
 
 	if writeExplanation {
 		s.WriteString(txt.Render(wordwrap.String(m.explanationText(), width)))
