@@ -236,6 +236,31 @@ func TestHeaderArrowClickNavigates(t *testing.T) {
 	}
 }
 
+// the title has a row of its own now; dragging over it must still copy it,
+// and the calendar row above it must stay unselectable
+func TestTitleIsSelectableOnItsOwnRow(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	lines := strings.Split(m.baseView(), "\n")
+	row := slices.IndexFunc(lines, func(l string) bool {
+		return strings.Contains(ansi.Strip(l), m.apod.Title)
+	})
+	if row < 1 {
+		t.Fatal("no title row under the calendar")
+	}
+	start, end, ok := columnSpan(ansi.Strip(lines[row]), m.apod.Title)
+	if !ok {
+		t.Fatal("title not found on its row")
+	}
+
+	m.selAnchor, m.selEnd, m.selActive = point{start, row}, point{end - 1, row}, true
+	if got := m.selectionText(); got != m.apod.Title {
+		t.Errorf("selectionText() = %q; want %q", got, m.apod.Title)
+	}
+	if _, _, ok := m.copyableSpan(ansi.Strip(lines[row-1])); ok {
+		t.Error("the calendar row is selectable; only the title and explanation are")
+	}
+}
+
 // a slow day that the user has already navigated away from must not land
 func TestStaleDayResponseIsDropped(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))

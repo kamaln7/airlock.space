@@ -945,19 +945,18 @@ func (m *Model) dayArrows() (prev, next string) {
 	return prev, next
 }
 
-// viewNav is the header's day line: the day on screen and its title, with the
-// days either side of it to step to.
+// viewNav is the header's calendar line: the day on screen with the days
+// either side of it to step to. The title sits on its own row beneath it.
 //
 // One row while it fits: the arrows pinned to the edges of a navMaxWidth
 // container with the day centered between them, which is justify-between with
-// the middle item centered rather than merely evenly spaced - so the title
-// holds the centre whatever the arrows either side of it are called. Too tight
-// for that and the three blocks wrap onto rows of their own, as flex-wrap
-// would. The caller centers whatever comes back.
+// the middle item centered rather than merely evenly spaced - so the day holds
+// the centre whatever the arrows either side of it are called. Too tight for
+// that and the three blocks wrap onto rows of their own, as flex-wrap would.
+// The caller centers whatever comes back.
 func (m *Model) viewNav(width int) string {
 	prev, next := m.dayArrows()
-	center := m.txtMuted().Render(m.apod.ApodDate.Format("Jan 2, 2006")) + " " +
-		hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
+	center := m.txtMuted().Render(m.apod.ApodDate.Format("Jan 2, 2006"))
 
 	inner := min(navMaxWidth, width)
 	pw, cw, nw := lipgloss.Width(prev), lipgloss.Width(center), lipgloss.Width(next)
@@ -1004,12 +1003,14 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 		return s.String()
 	}
 
-	// the day line gets a row of its own: with a date on each arrow it is too
-	// wide to share one with the header, so the flexbox the title used to do
-	// would only ever have collapsed - and jumped between days as it did
+	// calendar over title, both centered, on rows of their own: with a date on
+	// each arrow the day line is too wide to share one with the header, so the
+	// flexbox the title used to do would only ever have collapsed - and jumped
+	// between days as it did
+	title := hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
 	s.WriteString(header)
 	s.WriteString("\n\n")
-	s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width)))
+	s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width) + "\n" + title))
 	s.WriteString("\n\n")
 
 	if writeExplanation {
