@@ -1,0 +1,18 @@
+[Unit]
+Description=airlock.space SSH APOD server
+Requires=airlocksshd.socket
+
+[Service]
+ExecStart=/opt/airlocksshd
+NonBlocking=true
+DynamicUser=yes
+StateDirectory=airlocksshd
+WorkingDirectory=/var/lib/airlocksshd
+Environment=SSH_HOST_KEY=/var/lib/airlocksshd/id_ed25519
+# NASAKEY lives here, 0600 root, so it stays out of the unit and out of logs
+EnvironmentFile=/etc/airlocksshd.env
+Restart=always
+RestartSec=1s
+# 457MB box: a render can spike, so cap the service instead of OOMing the host
+MemoryHigh=192M
+MemoryMax=256M

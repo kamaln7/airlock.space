@@ -50,8 +50,10 @@ func main() {
 					wish.WriteString(s, airlockspace.Goodbye(re))
 				}
 			},
-			activeterm.Middleware(), // Bubble Tea apps usually require a PTY.
+			// middleware runs in reverse order, so activeterm goes last here to
+			// run first: PTY-less bots are dropped before logging sees them.
 			logging.Middleware(),
+			activeterm.Middleware(), // Bubble Tea apps usually require a PTY.
 		),
 	)
 	if err != nil {
