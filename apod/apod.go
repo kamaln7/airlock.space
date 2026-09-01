@@ -3,6 +3,7 @@ package apod
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -74,9 +75,15 @@ func ByDate(t time.Time) (*APOD, error) {
 		return a, nil
 	}
 
-	img, err := nasa.ApodImage(t) // ponytail: concurrent misses fetch twice, then agree
-	if err != nil {
-		return nil, redactAPIKey(err)
+	var img *nasa.Image
+	if rec := loadDay(key); rec != nil {
+		img = rec.APOD // the day is on disk; no reason to ask NASA again
+	} else {
+		var err error
+		img, err = nasa.ApodImage(t) // ponytail: concurrent misses fetch twice, then agree
+		if err != nil {
+			return nil, redactAPIKey(err)
+		}
 	}
 
 	days.Lock()
@@ -198,63 +205,103 @@ func imageCacheDir() string {
 
 var dateRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
-// cachePath is the on-disk image for this APOD, or "" when it cannot be
-// cached. The date is NASA's, so it is checked before it becomes a path.
-func (a *APOD) cachePath() string {
-	if cacheDir == "" || !dateRegexp.MatchString(a.Date) {
+// dayVersion is the on-disk format. Bump it and every stored day is ignored.
+const dayVersion = 1
+
+// day is one APOD as it sits on disk: our own bookkeeping wrapped around
+// NASA's response, kept whole and unedited. The image lives beside it as
+// <date>.img, and only exists when the day has one - the record is what says
+// whether it should, so a video day costs no fetch either.
+type day struct {
+	Version   int         `json:"version"`
+	CachedAt  time.Time   `json:"cached_at"`
+	HasImage  bool        `json:"has_image"`
+	ImageSize image.Point `json:"image_size,omitzero"`
+	APOD      *nasa.Image `json:"apod"`
+}
+
+// cacheFile names one of a day's files. The date is NASA's, so it is checked
+// before it becomes a path.
+func cacheFile(date, ext string) string {
+	if cacheDir == "" || !dateRegexp.MatchString(date) {
 		return ""
 	}
-	return filepath.Join(cacheDir, a.Date+".img")
+	return filepath.Join(cacheDir, date+"."+ext)
 }
 
-// cachedImage returns the stored image, if any. A zero-length file records a
-// day that has no image at all, which is worth remembering too.
-func (a *APOD) cachedImage() ([]byte, bool) {
-	path := a.cachePath()
+// loadDay reads a stored day. Anything wrong with it - missing, truncated,
+// written by an older format - is simply a miss.
+func loadDay(date string) *day {
+	path := cacheFile(date, "json")
 	if path == "" {
-		return nil, false
+		return nil
 	}
-	body, err := os.ReadFile(path)
+	byt, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false
+		return nil
 	}
-	if len(body) == 0 {
-		return nil, true
+	var d day
+	if err := json.Unmarshal(byt, &d); err != nil || d.Version != dayVersion || d.APOD == nil {
+		return nil
 	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil {
-		os.Remove(path) // truncated or corrupt; fetch it again
-		return nil, false
-	}
-	a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
-	return body, true
+	return &d
 }
 
-func (a *APOD) storeImage(body []byte) {
-	path := a.cachePath()
+// store records the day, and the image bytes when it has any. The image is
+// written first: the record is the index, so it must never promise a file
+// that is not there yet.
+func (a *APOD) store(body []byte) {
+	path := cacheFile(a.Date, "json")
 	if path == "" {
 		return
 	}
-	// write then rename, so a crash cannot leave a half image behind
+	if len(body) > 0 && !writeFile(cacheFile(a.Date, "img"), body) {
+		return
+	}
+	rec, err := json.Marshal(day{
+		Version:   dayVersion,
+		CachedAt:  time.Now().UTC(),
+		HasImage:  len(body) > 0,
+		ImageSize: a.ImageSize,
+		APOD:      a.Image,
+	})
+	if err != nil {
+		slog.Warn("could not encode cached day", "error", err)
+		return
+	}
+	writeFile(path, rec)
+}
+
+// writeFile replaces path atomically, so a crash cannot leave a half-written
+// file for the next run to trust.
+func writeFile(path string, byt []byte) bool {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
-		slog.Warn("could not cache image", "error", err)
-		return
+	if err := os.WriteFile(tmp, byt, 0o600); err != nil {
+		slog.Warn("could not write cache file", "path", path, "error", err)
+		return false
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		slog.Warn("could not cache image", "error", err)
+		slog.Warn("could not write cache file", "path", path, "error", err)
 		os.Remove(tmp)
+		return false
 	}
+	return true
 }
 
 func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
-	if body, ok := a.cachedImage(); ok {
-		return body, nil
+	if rec := loadDay(a.Date); rec != nil {
+		if !rec.HasImage {
+			return nil, nil
+		}
+		if body, err := os.ReadFile(cacheFile(a.Date, "img")); err == nil && rec.ImageSize != (image.Point{}) {
+			a.ImageSize = rec.ImageSize
+			return body, nil
+		}
 	}
 
 	urls := a.imageURLs()
 	if len(urls) == 0 {
-		a.storeImage(nil)
+		a.store(nil)
 		return nil, nil
 	}
 
@@ -271,11 +318,11 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 			continue
 		}
 		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
-		a.storeImage(body)
+		a.store(body)
 		return body, nil
 	}
 	if errors.Is(lastErr, errNotAnImage) {
-		a.storeImage(nil)
+		a.store(nil)
 		return nil, nil
 	}
 	return nil, lastErr

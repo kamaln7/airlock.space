@@ -75,7 +75,7 @@ func TestImageCacheSurvivesANewAPODInstance(t *testing.T) {
 	}
 }
 
-func TestVideoDayIsCachedOnDiskToo(t *testing.T) {
+func TestVideoDayIsRecordedWithoutAnImageFile(t *testing.T) {
 	cacheDir = t.TempDir()
 	defer func() { cacheDir = imageCacheDir() }()
 
@@ -97,13 +97,12 @@ func TestVideoDayIsCachedOnDiskToo(t *testing.T) {
 	}
 }
 
-func TestCachePathRejectsADateThatIsNotOne(t *testing.T) {
+func TestCacheFileRejectsADateThatIsNotOne(t *testing.T) {
 	cacheDir = t.TempDir()
 	defer func() { cacheDir = imageCacheDir() }()
 
-	a := &APOD{Image: &nasa.Image{Date: "../../etc/passwd"}}
-	if got := a.cachePath(); got != "" {
-		t.Errorf("cachePath() = %q; want empty", got)
+	if got := cacheFile("../../etc/passwd", "json"); got != "" {
+		t.Errorf("cacheFile() = %q; want empty", got)
 	}
 }
 
