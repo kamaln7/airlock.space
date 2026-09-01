@@ -107,13 +107,47 @@ func TestKittyPNGFitsTheBox(t *testing.T) {
 	}
 }
 
-func TestPixelBoxFallsBackToCellGuess(t *testing.T) {
-	m := &Model{Width: 100, Height: 40}
-	if w, h := m.pixelBox(); w != 1000 || h != 800 {
-		t.Errorf("pixelBox() = %d,%d; want the 10x20 per cell guess", w, h)
+// the photo is encoded for the cells it will be drawn into, not the screen:
+// on a wide terminal the picture is a column beside the text, and pixels are
+// the only real lever on what it weighs
+func TestPhotoBoxIsThePaneNotTheScreen(t *testing.T) {
+	m := &Model{Width: 200, Height: 50, cellW: 8, cellH: 20}
+
+	w, h := m.photoBox()
+	if w != imageMaxWidth*8 {
+		t.Errorf("main view photo is %d px wide; want the %d-cell column", w, imageMaxWidth)
 	}
-	m.WidthPixels, m.HeightPixels = 2400, 1600
-	if w, h := m.pixelBox(); w != 2400 || h != 1600 {
-		t.Errorf("pixelBox() = %d,%d; want what ssh reported", w, h)
+	if full := 200 * 8; w >= full {
+		t.Errorf("main view photo is %d px wide, the whole screen is %d", w, full)
+	}
+	if h != (50-photoChrome)*20 {
+		t.Errorf("main view photo is %d px tall; want the rows left after the page", h)
+	}
+
+	// fullscreen asks for the lot, and gets it
+	m.State = StateFullscreen
+	fw, fh := m.photoBox()
+	if fw != 200*8 || fh != 50*20 {
+		t.Errorf("fullscreen photo box is %dx%d; want the whole screen", fw, fh)
+	}
+	if fw*fh <= w*h {
+		t.Error("fullscreen asks for no more pixels than the column does")
+	}
+}
+
+// without the terminal's own answer, fall back to the ssh window, then to a
+// plain guess at the cell
+func TestCellPixels(t *testing.T) {
+	m := &Model{Width: 100, Height: 40}
+	if w, h := m.cellPixels(); w != 10 || h != 20 {
+		t.Errorf("cellPixels() = %d,%d with nothing to go on; want the 10x20 guess", w, h)
+	}
+	m.WidthPixels, m.HeightPixels = 800, 800
+	if w, h := m.cellPixels(); w != 8 || h != 20 {
+		t.Errorf("cellPixels() = %d,%d from the ssh window; want 8,20", w, h)
+	}
+	m.cellW, m.cellH = 9, 26
+	if w, h := m.cellPixels(); w != 9 || h != 26 {
+		t.Errorf("cellPixels() = %d,%d; want the terminal's own 9,26", w, h)
 	}
 }

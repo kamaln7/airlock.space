@@ -871,6 +871,65 @@ func TestOverlayCenterKeepsWhatIsAround(t *testing.T) {
 	}
 }
 
+// the photo is encoded for the column it sits in, so going fullscreen has to
+// fetch a sharper one - and coming back must not fetch a blurrier one
+func TestFullscreenAsksForASharperPhoto(t *testing.T) {
+	m := besideImage(t, 200, 50)
+	m.cellW, m.cellH = 8, 20
+	m.preferArt, m.kittyReady = false, false
+
+	if cmd := m.sendKitty(); cmd == nil {
+		t.Fatal("no first send")
+	}
+	column := m.sentW * m.sentH
+	m.kittyReady = true
+
+	if cmd := m.sendKitty(); cmd != nil {
+		t.Error("sent the same photo again for the same box")
+	}
+
+	// pressing f has to be what asks for it, not a direct call
+	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if m.State != StateFullscreen {
+		t.Fatal("f did not go fullscreen")
+	}
+	if full := m.sentW * m.sentH; full <= column {
+		t.Errorf("fullscreen asked for %d pixels, the column had %d", full, column)
+	}
+
+	m.kittyReady, m.State = true, StateAPOD
+	if cmd := m.sendKitty(); cmd != nil {
+		t.Error("sent a smaller photo on the way out of fullscreen")
+	}
+}
+
+// dragging a window edge fires resizes by the dozen; the photo is megabytes
+func TestResizeWaitsForTheDraggingToStop(t *testing.T) {
+	m := besideImage(t, 150, 40)
+	m.preferArt, m.photoToggled, m.kittyReady = false, true, false
+
+	for i := range 5 {
+		m.Update(tea.WindowSizeMsg{Width: 150 + i, Height: 40})
+	}
+	if m.sentW != 0 {
+		t.Fatal("a photo went out mid-drag")
+	}
+	latest := m.resizeGen
+	if latest != 5 {
+		t.Fatalf("five resizes counted as %d", latest)
+	}
+
+	m.Update(msgResized{gen: latest - 3}) // an earlier one, long overtaken
+	if m.sentW != 0 {
+		t.Error("an overtaken resize sent a photo")
+	}
+
+	m.Update(msgResized{gen: latest})
+	if m.sentW == 0 {
+		t.Error("the resize settled and nothing was sent")
+	}
+}
+
 // most days are already in hand and arrive in a millisecond. A spinner
 // between them is a flicker, so the day on screen holds until the new one is
 // actually slow.

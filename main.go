@@ -111,6 +111,8 @@ type Model struct {
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
 	vpWidth        int
+	sentW, sentH   int       // the pixel box the photo on screen was encoded for
+	resizeGen      int       // which resize the pending settle belongs to
 	daySince       time.Time // when the day on screen started loading
 	photoSince     time.Time // when the photo started on its way
 	placedCols     int       // current kitty virtual placement size
@@ -132,6 +134,13 @@ const (
 var spinnerFrames = []string{"🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"}
 
 type msgSpin struct{}
+
+// resizeSettle is how long the window must hold still before the photo is
+// encoded for it.
+const resizeSettle = 750 * time.Millisecond
+
+// msgResized says a resize has stopped moving, if no later one has started.
+type msgResized struct{ gen int }
 
 func spinTick() tea.Cmd {
 	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
@@ -156,7 +165,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Width = msg.Width
 		m.applyArtDefault()
 		// a resize can mean a new font size, and so a new cell
-		cmds = append(cmds, m.sendKitty(), requestCellSize)
+		m.resizeGen++
+		gen := m.resizeGen
+		cmds = append(cmds, requestCellSize, tea.Tick(resizeSettle, func(time.Time) tea.Msg {
+			return msgResized{gen}
+		}))
+	case msgResized:
+		// dragging a window edge fires these by the dozen and the photo is
+		// megabytes, so nothing is sent until the dragging stops
+		if msg.gen == m.resizeGen {
+			cmds = append(cmds, m.sendKitty())
+		}
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			// no need to drop the placement: a new cell shape fits the picture
@@ -180,6 +199,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.State = StateFullscreen
 			}
+			// the photo was cut for the column it sat in; fullscreen has room
+			// for a sharper one, and sendKitty only goes again if it is bigger
+			cmds = append(cmds, m.sendKitty())
 		case key.Matches(msg, keyPhoto):
 			if m.KittyGraphics && m.imageOK {
 				m.preferArt = !m.preferArt
@@ -256,6 +278,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.imageOK = false
 		m.kittyReady = false
+		m.sentW, m.sentH = 0, 0
 		m.imageLoading = true
 		// a new day starts as art again: the photo is megabytes, and having
 		// asked for it on one picture is not asking for it on every one after
@@ -398,14 +421,32 @@ func (m *Model) cellAspect() float64 {
 	return defaultCellAspect
 }
 
-func (m *Model) pixelBox() (w, h int) {
-	if m.WidthPixels > 0 && m.HeightPixels > 0 {
-		return m.WidthPixels, m.HeightPixels
-	}
+func (m *Model) cellPixels() (w, h int) {
 	if m.cellW > 0 && m.cellH > 0 {
-		return m.Width * m.cellW, m.Height * m.cellH
+		return m.cellW, m.cellH // the terminal's own answer
 	}
-	return m.Width * 10, m.Height * 20
+	if m.WidthPixels > 0 && m.HeightPixels > 0 && m.Width > 0 && m.Height > 0 {
+		return m.WidthPixels / m.Width, m.HeightPixels / m.Height
+	}
+	return 10, 20
+}
+
+// photoChrome is the rows the page keeps for itself around the picture: the
+// header block, the link and the help bar, with their blank lines.
+const photoChrome = 12
+
+// photoBox is the device-pixel box the photo is encoded for - the cells it
+// will actually be drawn into, not the whole terminal. In the main view that
+// is a column beside the text, which on a wide screen is a fraction of the
+// screen, and pixels are the only real lever on what a photo weighs: a
+// lossless png of one is twice its jpeg whatever else is done to it. Only
+// fullscreen wants the lot, and asks for it by going there.
+func (m *Model) photoBox() (w, h int) {
+	cw, ch := m.cellPixels()
+	if m.State == StateFullscreen {
+		return max(1, m.Width) * cw, max(1, m.Height) * ch
+	}
+	return min(imageMaxWidth, max(1, m.Width-2)) * cw, max(1, m.Height-photoChrome) * ch
 }
 
 // sendKitty uploads the photo to the terminal, once per day and only when the
@@ -414,11 +455,15 @@ func (m *Model) pixelBox() (w, h int) {
 // viewports get, needs none of it. Until it arrives, imageArea falls back to
 // the art, so the wait shows something rather than nothing.
 func (m *Model) sendKitty() tea.Cmd {
-	if !m.KittyGraphics || m.Session == nil || m.kittyReady || !m.imageOK || m.preferArt {
+	if !m.KittyGraphics || m.Session == nil || !m.imageOK || m.preferArt {
 		return nil
 	}
+	maxW, maxH := m.photoBox()
+	if m.kittyReady && m.sentW >= maxW && m.sentH >= maxH {
+		return nil // the one already up there is at least this sharp
+	}
 	a, out := m.apod, m.Session
-	maxW, maxH := m.pixelBox()
+	m.sentW, m.sentH = maxW, maxH
 	m.photoSince = time.Now()
 	return func() tea.Msg {
 		img, err := a.Decode()
