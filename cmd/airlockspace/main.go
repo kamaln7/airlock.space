@@ -7,10 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	airlockspace "github.com/kamaln7/airlock.space"
-	"github.com/muesli/termenv"
 )
 
 func main() {
@@ -21,7 +20,6 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 	}
 
-	renderer := lipgloss.NewRenderer(os.Stdout)
 	term, termProgram := os.Getenv("TERM"), os.Getenv("TERM_PROGRAM")
 	kitty := false
 	switch strings.ToLower(term) {
@@ -36,16 +34,11 @@ func main() {
 		kitty = false
 	}
 
-	m := &airlockspace.Model{
-		Style:         renderer.NewStyle(),
-		Profile:       termenv.ColorProfile(),
-		KittyGraphics: kitty,
-		Session:       os.Stdout,
-	}
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
-	if _, err := p.Run(); err != nil {
+	// alt screen and mouse mode are View fields in bubbletea v2, not options
+	m := &airlockspace.Model{KittyGraphics: kitty, Session: os.Stdout}
+	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	fmt.Print(airlockspace.Goodbye(renderer))
+	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye())
 }

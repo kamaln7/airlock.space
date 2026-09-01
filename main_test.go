@@ -9,10 +9,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
 	"github.com/kamaln7/airlock.space/apod"
-	"github.com/muesli/termenv"
 	"github.com/peteretelej/nasa"
 )
 
@@ -36,11 +34,11 @@ func TestFitImage(t *testing.T) {
 // on a video day (no image) e must not toggle into a view that can't exist,
 // and the footer must not offer it
 func TestVideoDayNoImageToggle(t *testing.T) {
-	m := &Model{Style: lipgloss.NewStyle(), apod: &apod.APOD{Image: &nasa.Image{}}}
+	m := &Model{apod: &apod.APOD{Image: &nasa.Image{}}}
 	m.Init()
 	m.Update(imageMsg{ok: false})
 	before := m.imgOrExplanation
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	if m.imgOrExplanation != before {
 		t.Error("e toggled with no image to toggle to")
 	}
@@ -57,7 +55,7 @@ func TestVideoDayNoImageToggle(t *testing.T) {
 // an explanation taller than the viewport scrolls off the top; hit-testing
 // must follow the rows actually on screen, or hover/click land on the wrong row
 func TestHitTestWhenFrameOverflows(t *testing.T) {
-	m := &Model{Width: 80, Height: 24, Style: lipgloss.NewStyle(),
+	m := &Model{Width: 80, Height: 24,
 		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
 			Explanation: strings.Repeat("some words about space. ", 60),
 			ApodDate:    time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)}}}
@@ -84,9 +82,7 @@ func TestHitTestWhenFrameOverflows(t *testing.T) {
 // sequence embedded in the styled text: the hyperlink must wrap the styled
 // string, not the other way round. Only reproduces at a real color profile.
 func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
-	re := lipgloss.NewRenderer(nil)
-	re.SetColorProfile(termenv.TrueColor)
-	m := &Model{Width: 100, Height: 40, Style: re.NewStyle(), hoverLink: true,
+	m := &Model{Width: 100, Height: 40, hoverLink: true,
 		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
 			Explanation: "some words about space.",
 			ApodDate:    time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)}}}
@@ -120,7 +116,7 @@ func day(y int, mo time.Month, d int) time.Time {
 
 func testModel(t *testing.T, date time.Time) *Model {
 	t.Helper()
-	m := &Model{Width: 100, Height: 40, Style: lipgloss.NewStyle(),
+	m := &Model{Width: 100, Height: 40,
 		date: date, latest: day(2026, 8, 31),
 		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
 			Explanation: "some words about space.", ApodDate: date}}}
@@ -128,8 +124,8 @@ func testModel(t *testing.T, date time.Time) *Model {
 	return m
 }
 
-func press(m *Model, k tea.KeyType) {
-	m.Update(tea.KeyMsg{Type: k})
+func press(m *Model, code rune) {
+	m.Update(tea.KeyPressMsg{Code: code})
 }
 
 func TestDayNavigationStaysInRange(t *testing.T) {

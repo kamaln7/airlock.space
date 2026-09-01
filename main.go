@@ -2,6 +2,7 @@ package airlockspace
 
 import (
 	"fmt"
+	"image/color"
 	"io"
 	"log/slog"
 	"math"
@@ -11,13 +12,13 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kamaln7/airlock.space/apod"
 	"github.com/muesli/reflow/wordwrap"
-	"github.com/muesli/termenv"
 	"github.com/samber/lo"
 	lom "github.com/samber/lo/mutable"
 )
@@ -39,19 +40,33 @@ func (m *Model) explanationText() string {
 	return m.explCache
 }
 
+// txt is the base style. v2 has no per-session renderer: the program converts
+// colors to the client's profile on the way out, so one plain style serves
+// every session.
+var txt = lipgloss.NewStyle()
+
+// adaptive is a light/dark color pair. lipgloss v2 dropped AdaptiveColor along
+// with the renderer that knew the background, so the pair is resolved per
+// model instead - see Model.color.
+type adaptive struct{ light, dark color.Color }
+
 var (
-	colorMuted      = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
-	colorSuperMuted = lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"}
-	colorNebula     = lipgloss.AdaptiveColor{Light: "#B4A7D6", Dark: "#6B4E8C"} // Purple nebula tones
-	colorCosmic     = lipgloss.AdaptiveColor{Light: "#A7D6D6", Dark: "#4E8C8C"} // Deep space teal
-	colorStellar    = lipgloss.AdaptiveColor{Light: "#D6B4A7", Dark: "#8C6B4E"} // Warm star glow
+	colorMuted      = adaptive{lipgloss.Color("#9B9B9B"), lipgloss.Color("#5C5C5C")}
+	colorSuperMuted = adaptive{lipgloss.Color("#DDDADA"), lipgloss.Color("#3C3C3C")}
+	colorNebula     = adaptive{lipgloss.Color("#B4A7D6"), lipgloss.Color("#6B4E8C")} // Purple nebula tones
+	colorCosmic     = adaptive{lipgloss.Color("#A7D6D6"), lipgloss.Color("#4E8C8C")} // Deep space teal
+	colorStellar    = adaptive{lipgloss.Color("#D6B4A7"), lipgloss.Color("#8C6B4E")} // Warm star glow
+	colorYellow     = lipgloss.Color("220")
 )
+
+// color picks the side of a pair matching the terminal background.
+func (m *Model) color(a adaptive) color.Color {
+	return lipgloss.LightDark(!m.isLight)(a.light, a.dark)
+}
 
 type Model struct {
 	Width         int
 	Height        int
-	Style         lipgloss.Style
-	Profile       termenv.Profile
 	KittyGraphics bool      // client can render real images via the kitty graphics protocol
 	Session       io.Writer // raw session output, for kitty image transmission
 	// WidthPixels and HeightPixels are the terminal's drawable size in device
@@ -59,6 +74,13 @@ type Model struct {
 	// does not send it.
 	WidthPixels  int
 	HeightPixels int
+
+	// Profile and isLight come from the terminal via bubbletea, not from the
+	// server's own environment. Stated the light way round so the zero value
+	// is dark: that is the right guess for a picture of space, and it holds
+	// until the terminal answers - if it ever does.
+	Profile colorprofile.Profile
+	isLight bool
 
 	State            State
 	imgOrExplanation bool // true -> img, false -> explanation
@@ -119,7 +141,7 @@ func (m *Model) spinnerView() string {
 
 func (m *Model) Init() tea.Cmd {
 	m.imgOrExplanation = true
-	return tea.Batch(m.loadAPOD(m.date), spinTick())
+	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -132,7 +154,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Width = msg.Width
 		m.applyArtDefault()
 		cmds = append(cmds, m.sendKitty())
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
 			return m, tea.Quit
@@ -164,29 +186,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.photoToggled = true
 				cmds = append(cmds, m.sendKitty())
 			}
+		case key.Matches(msg, keyCopySelection):
+			cmds = append(cmds, m.copySelection())
 		case key.Matches(msg, keyCopy):
 			if m.apod != nil {
 				cmds = append(cmds, m.copyLink())
 			}
 		}
-	case tea.MouseMsg:
-		switch {
-		case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft:
+	case tea.MouseMotionMsg:
+		m.mouseX, m.mouseY = msg.X, msg.Y
+		if msg.Button == tea.MouseLeft {
 			// drag: extend the text selection
-			m.mouseX, m.mouseY = msg.X, msg.Y
 			if m.selPending {
 				m.selEnd = point{msg.X, msg.Y}
 				m.selActive = m.selEnd != m.selAnchor
 			}
-		case msg.Action == tea.MouseActionMotion:
-			m.mouseX, m.mouseY = msg.X, msg.Y
-			m.hoverKey, m.hoverLink = m.hitTest(msg.X, msg.Y)
-		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+			break
+		}
+		m.hoverKey, m.hoverLink = m.hitTest(msg.X, msg.Y)
+	case tea.MouseClickMsg:
+		switch msg.Button {
+		case tea.MouseLeft:
 			m.selActive, m.selPending = false, false
 			helpKey, onLink := m.hitTest(msg.X, msg.Y)
 			if helpKey != "" {
 				// dispatch the clicked help item as if its key was pressed
-				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(helpKey)})
+				r := []rune(helpKey)[0]
+				return m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 			}
 			if onLink {
 				cmds = append(cmds, m.copyLink())
@@ -195,15 +221,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selPending = true
 			m.selAnchor = point{msg.X, msg.Y}
 			m.selEnd = m.selAnchor
-		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
-			// right-click copies the selection (cmd+c/ctrl+shift+c never reach
-			// the app, and ctrl+c must stay quit)
-			if m.selActive {
-				if text := m.selectionText(); text != "" {
-					io.WriteString(m.Session, osc52Copy(text))
-				}
-				m.selActive = false
-			}
+		case tea.MouseRight:
+			// right-click copies the selection, for terminals that keep
+			// ctrl+shift+c for themselves
+			cmds = append(cmds, m.copySelection())
 		}
 	case apodMsg:
 		if !msg.date.Equal(m.date) {
@@ -237,6 +258,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.kittyReady = msg.ok
 			m.placedCols, m.placedRows = 0, 0
 		}
+	case tea.ColorProfileMsg:
+		m.Profile = msg.Profile
+	case tea.BackgroundColorMsg:
+		m.isLight = !msg.IsDark()
 	case msgSpin:
 		// when the spinner isn't visible the frame is unchanged and bubbletea
 		// skips the flush, so the perpetual tick is free
@@ -395,9 +420,22 @@ var (
 		key.WithKeys("c"),
 		key.WithHelp("c", "copy link"),
 	)
+	// v2 asks the terminal for key disambiguation, so ctrl+shift+c finally
+	// arrives as itself rather than as ctrl+c. Kept off the help bar: whether
+	// it reaches us at all is the terminal's call.
+	keyCopySelection = key.NewBinding(key.WithKeys("ctrl+shift+c"))
 )
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeAllMotion
+	return v
+}
+
+// render draws the frame. Kept apart from View so the selection helpers, which
+// re-render to read a row back, deal in plain strings.
+func (m *Model) render() string {
 	if m.Width == 0 || m.Height == 0 {
 		// don't draw until the terminal size is known; a zero-width frame
 		// leaves artifacts behind once the real one renders
@@ -442,15 +480,15 @@ func (m *Model) viewAPOD() string {
 		freeHeight -= countLines(apodView)
 		var imgBlock string
 		if m.imageOK {
-			imgBlock = m.Style.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(m.imageArea(freeWidth, freeHeight))
+			imgBlock = txt.Width(freeWidth).Height(freeHeight).Align(lipgloss.Center, lipgloss.Center).Render(m.imageArea(freeWidth, freeHeight))
 		} else {
 			// pin the spinner to the exact screen center (same row as viewLoading)
 			pad := max(0, m.Height/2-1-countLines(apodView))
-			imgBlock = m.Style.Width(freeWidth).Height(freeHeight).Render(
-				strings.Repeat("\n", pad) + m.Style.Width(freeWidth).Align(lipgloss.Center).Render(m.loadingLine()),
+			imgBlock = txt.Width(freeWidth).Height(freeHeight).Render(
+				strings.Repeat("\n", pad) + txt.Width(freeWidth).Align(lipgloss.Center).Render(m.loadingLine()),
 			)
 		}
-		return m.Style.Margin(1, 1, 0, 1).Render(
+		return txt.Margin(1, 1, 0, 1).Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				apodView,
 				imgBlock,
@@ -467,7 +505,7 @@ func (m *Model) viewAPOD() string {
 		if asciiArt != "" {
 			content = lipgloss.JoinHorizontal(lipgloss.Top,
 				textCol,
-				m.Style.MarginLeft(8).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
+				txt.MarginLeft(8).Height(lipgloss.Height(textCol)).Align(lipgloss.Center, lipgloss.Center).Render(asciiArt),
 			)
 		}
 		return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
@@ -484,21 +522,35 @@ func (m *Model) viewLinkLine() string {
 	}
 	hint := "" // its own row, so the URL never shifts when this appears
 	if m.copiedRecently {
-		hint = m.Style.Bold(true).Render("copied!")
+		hint = txt.Bold(true).Render("copied!")
 	}
 	// hyperlink outside the style, never inside: lipgloss styles rune by rune
 	// under Underline, which shreds an embedded escape into literal text
-	return termenv.Hyperlink(link, st.Render(link)) + "\n" + hint
+	return hyperlink(link, st.Render(link)) + "\n" + hint
 }
 
 type msgCopyExpired struct{}
 
-// copyLink puts the APOD link on the client clipboard via OSC 52 and shows
-// brief feedback.
+// copyLink puts the APOD link on the client clipboard and shows brief feedback.
 func (m *Model) copyLink() tea.Cmd {
-	io.WriteString(m.Session, osc52Copy(m.apod.Link()))
 	m.copiedRecently = true
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return msgCopyExpired{} })
+	return tea.Batch(
+		tea.SetClipboard(m.apod.Link()),
+		tea.Tick(2*time.Second, func(time.Time) tea.Msg { return msgCopyExpired{} }),
+	)
+}
+
+// copySelection copies the highlighted text, if any, and clears the highlight.
+func (m *Model) copySelection() tea.Cmd {
+	if !m.selActive {
+		return nil
+	}
+	m.selActive = false
+	text := m.selectionText()
+	if text == "" {
+		return nil
+	}
+	return tea.SetClipboard(text)
 }
 
 // helpKeys returns the keybindings shown (and clickable) in the current state.
@@ -548,15 +600,15 @@ func (m *Model) viewHelp() string {
 			b.WriteString(m.divDot().Render())
 		}
 		h := k.Help()
-		keySt := m.Style.Bold(true)
+		keySt := txt.Bold(true)
 		descSt := m.txtMuted()
 		if m.hoverKey == h.Key {
-			keySt = keySt.Foreground(lipgloss.Color("220")).Underline(true)
+			keySt = keySt.Foreground(colorYellow).Underline(true)
 			descSt = m.txtYellow()
 		}
 		b.WriteString(keySt.Render(h.Key) + " " + descSt.Render(h.Desc))
 	}
-	return m.Style.MarginTop(1).Render(b.String())
+	return txt.MarginTop(1).Render(b.String())
 }
 
 type point struct{ X, Y int }
@@ -639,7 +691,7 @@ func (m *Model) applySelection(frame string) string {
 			continue
 		}
 		// the selected span loses its colors (stripped) — standard selection look
-		mid := m.Style.Reverse(true).Render(ansi.Strip(ansi.Cut(line, x1, x2)))
+		mid := txt.Reverse(true).Render(ansi.Strip(ansi.Cut(line, x1, x2)))
 		lines[y] = ansi.Cut(line, 0, x1) + mid + ansi.TruncateLeft(line, x2, "")
 	}
 	return strings.Join(lines, "\n")
@@ -728,17 +780,17 @@ func (m *Model) viewLoading() string {
 	// spinner pinned to the exact screen center so it doesn't jump when the
 	// view transitions to the image-loading phase
 	pad := max(0, m.Height/2)
-	return m.Style.Width(m.Width).Height(m.Height).Render(
-		strings.Repeat("\n", pad) + m.Style.Width(m.Width).Align(lipgloss.Center).Render(m.loadingLine()),
+	return txt.Width(m.Width).Height(m.Height).Render(
+		strings.Repeat("\n", pad) + txt.Width(m.Width).Align(lipgloss.Center).Render(m.loadingLine()),
 	)
 }
 
 func (m *Model) txtMuted() lipgloss.Style {
-	return m.Style.Foreground(colorMuted)
+	return txt.Foreground(m.color(colorMuted))
 }
 
 func (m *Model) txtSuperMuted() lipgloss.Style {
-	return m.Style.Foreground(colorSuperMuted)
+	return txt.Foreground(m.color(colorSuperMuted))
 }
 
 func (m *Model) divDot() lipgloss.Style {
@@ -746,19 +798,24 @@ func (m *Model) divDot() lipgloss.Style {
 }
 
 func (m *Model) txtYellow() lipgloss.Style {
-	return m.Style.Foreground(lipgloss.Color("220"))
+	return txt.Foreground(colorYellow)
+}
+
+// hyperlink wraps already-styled text in an OSC 8 hyperlink.
+func hyperlink(url, text string) string {
+	return ansi.SetHyperlink(url) + text + ansi.ResetHyperlink()
 }
 
 func countLines(str string) int {
 	return len(strings.Split(str, "\n"))
 }
 
-// Goodbye is printed on exit, outside the alt screen. The renderer determines
-// the color profile of the target terminal.
-func Goodbye(re *lipgloss.Renderer) string {
-	txt := re.NewStyle()
-	muted := txt.Foreground(colorMuted)
-	yellow := txt.Foreground(lipgloss.Color("220"))
+// Goodbye is printed on exit, outside the alt screen. It writes truecolor
+// escapes; the caller sends them through a colorprofile.Writer, which
+// downsamples them to what the client can show.
+func Goodbye() string {
+	muted := txt.Foreground(colorMuted.dark)
+	yellow := txt.Foreground(colorYellow)
 
 	msg := yellow.Render(" ♥ thanks for visiting! wishing you clear skies ~") + "\n\n"
 	// StaleOnError can return a usable stale APOD alongside an error
@@ -792,7 +849,7 @@ func (m *Model) decorArt(freeWidth, freeHeight int) string {
 		if lipgloss.Width(art) > freeWidth {
 			continue
 		}
-		asciiArt = colorize(m.Style, art, colorMuted, colorCosmic, colorStellar, colorNebula)
+		asciiArt = colorize(art, m.color(colorMuted), m.color(colorCosmic), m.color(colorStellar), m.color(colorNebula))
 		break
 	}
 	m.artKey, m.art = key, asciiArt
@@ -845,7 +902,7 @@ func (m *Model) imageArea(cols, rows int) string {
 // When the width allows, the title shares the header row (flexbox-style);
 // otherwise it gets its own centered block below.
 func (m *Model) viewAPODText(width int, writeExplanation bool) string {
-	txt := m.Style
+	txt := txt
 	var s strings.Builder
 
 	header := m.txtMuted().Render("🌌 Astronomy Picture of the Day")
@@ -859,7 +916,7 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	}
 
 	dateLine := m.txtMuted().Render(m.apod.ApodDate.Format(time.DateOnly))
-	title := termenv.Hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
+	title := hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
 
 	// center the title relative to the viewport, not the space next to the
 	// header; overlay works when the centered span clears the header
@@ -889,15 +946,14 @@ func (m *Model) viewAPODText(width int, writeExplanation bool) string {
 	return s.String()
 }
 
-func colorize(style lipgloss.Style, str string, colors ...lipgloss.TerminalColor) string {
+func colorize(str string, colors ...color.Color) string {
 	var s strings.Builder
 	for _, char := range str {
 		if unicode.IsSpace(char) {
 			s.WriteRune(char)
 			continue
 		}
-		color := lo.Sample(colors)
-		s.WriteString(style.Foreground(color).Render(string(char)))
+		s.WriteString(txt.Foreground(lo.Sample(colors)).Render(string(char)))
 	}
 	return s.String()
 }

@@ -13,16 +13,15 @@ import (
 	"syscall"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/log"
-	"github.com/charmbracelet/ssh"
-	"github.com/charmbracelet/wish"
-	"github.com/charmbracelet/wish/activeterm"
-	"github.com/charmbracelet/wish/bubbletea"
-	"github.com/charmbracelet/wish/logging"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/log/v2"
+	"charm.land/ssh"
+	"charm.land/wish/v2"
+	"charm.land/wish/v2/activeterm"
+	"charm.land/wish/v2/bubbletea"
+	"charm.land/wish/v2/logging"
+	"github.com/charmbracelet/colorprofile"
 	airlockspace "github.com/kamaln7/airlock.space"
-	"github.com/muesli/termenv"
 )
 
 var (
@@ -30,26 +29,26 @@ var (
 	port = GetEnv("SSH_PORT", "23234")
 )
 
-// profileKey stores the detected termenv.Profile in the session context.
-var profileKey struct{ _ byte }
-
 func main() {
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(GetEnv("SSH_HOST_KEY", ".airlocksshd/id_ed25519")),
 		// ponytail: flat 1h idle cutoff; per-session activity tracking if long-lived dashboards matter
 		wish.WithIdleTimeout(time.Hour),
+		// charm.land/ssh only reports a PTY for a session it emulates or
+		// allocates one for; without this Pty() says no and activeterm turns
+		// every client away. Emulated is what v1 did implicitly.
+		ssh.EmulatePty(),
 		wish.WithMiddleware(
-			bubbletea.MiddlewareWithProgramHandler(program, termenv.Ascii),
+			bubbletea.MiddlewareWithProgramHandler(program),
 			// runs after the tea program exits, outside the alt screen
 			func(next ssh.Handler) ssh.Handler {
 				return func(s ssh.Session) {
 					next(s)
-					re := lipgloss.NewRenderer(s)
-					if p, ok := s.Context().Value(profileKey).(termenv.Profile); ok {
-						re.SetColorProfile(p)
-					}
-					wish.WriteString(s, airlockspace.Goodbye(re))
+					// the goodbye is written raw, past the program: downsample
+					// its colors to what this client can actually show
+					w := colorprofile.Writer{Forward: s, Profile: sessionProfile(s)}
+					w.WriteString(airlockspace.Goodbye())
 				}
 			},
 			// middleware runs in reverse order, so activeterm goes last here to
@@ -119,39 +118,10 @@ func program(s ssh.Session) *tea.Program {
 	return tea.NewProgram(m, opts...)
 }
 
-// You can wire any Bubble Tea model up to the middleware with a function that
-// handles the incoming ssh.Session. Here we just grab the terminal info and
-// pass it to the new model. You can also return tea.ProgramOptions (such as
-// tea.WithAltScreen) on a session by session basis.
+// teaHandler builds the model and the program options for one session.
 func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-	// This should never fail, as we are using the activeterm middleware.
+	// never fails: activeterm has already turned away sessions with no PTY
 	pty, _, _ := s.Pty()
-
-	// When running a Bubble Tea app over SSH, you shouldn't use the default
-	// lipgloss.NewStyle function.
-	// That function will use the color profile from the os.Stdin, which is the
-	// server, not the client.
-	// We provide a MakeRenderer function in the bubbletea middleware package,
-	// so you can easily get the correct renderer for the current session, and
-	// use it to create the styles.
-	// The recommended way to use these styles is to then pass them down to
-	// your Bubble Tea model.
-	renderer := bubbletea.MakeRenderer(s)
-	var colorTerm, termProgram string
-	for _, env := range s.Environ() {
-		if v, ok := strings.CutPrefix(env, "COLORTERM="); ok {
-			colorTerm = v
-		}
-		if v, ok := strings.CutPrefix(env, "TERM_PROGRAM="); ok {
-			termProgram = v
-		}
-		if v, ok := strings.CutPrefix(env, "LC_TERMINAL="); ok && termProgram == "" {
-			termProgram = v
-		}
-	}
-	profile := getSSHTermInfo(pty.Term, colorTerm, termProgram)
-	renderer.SetColorProfile(profile)
-	s.Context().SetValue(profileKey, profile)
 
 	// one writer for the renderer and for our image writes, in that order of
 	// discovery: wish's MakeOptions picks the right input, our WithOutput then
@@ -160,19 +130,51 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	m := &airlockspace.Model{
 		Width:         pty.Window.Width,
 		Height:        pty.Window.Height,
-		Style:         renderer.NewStyle(),
-		Profile:       profile,
-		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram),
+		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram(s.Environ())),
 		Session:       out,
 		WidthPixels:   pty.Window.WidthPixels,
 		HeightPixels:  pty.Window.HeightPixels,
 	}
+	// alt screen and mouse tracking are View fields in v2. The profile goes
+	// last: MakeOptions already guesses one, and ours knows more.
 	opts := append(bubbletea.MakeOptions(s),
 		tea.WithOutput(out),
-		tea.WithAltScreen(),
-		tea.WithMouseAllMotion(),
+		tea.WithColorProfile(sessionProfile(s)),
 	)
 	return m, opts
+}
+
+// termProgram is how iTerm2 and friends announce themselves. Over ssh it only
+// arrives if the client forwards it, hence LC_TERMINAL as the fallback: it
+// rides along in the LC_* vars ssh sends by default.
+func termProgram(env []string) string {
+	var prog string
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "TERM_PROGRAM="); ok {
+			prog = v
+		}
+		if v, ok := strings.CutPrefix(e, "LC_TERMINAL="); ok && prog == "" {
+			prog = v
+		}
+	}
+	return prog
+}
+
+// sessionProfile is the client's color profile. colorprofile.Env reads TERM
+// and COLORTERM, which covers most clients; it knows nothing about
+// TERM_PROGRAM, so the terminals that only announce themselves that way are
+// upgraded here.
+func sessionProfile(s ssh.Session) colorprofile.Profile {
+	env := s.Environ()
+	if pty, _, ok := s.Pty(); ok {
+		env = append(env, "TERM="+pty.Term)
+	}
+	p := colorprofile.Env(env)
+	switch strings.ToLower(termProgram(env)) {
+	case "iterm2", "iterm.app", "kitty", "ghostty", "wezterm":
+		return max(p, colorprofile.TrueColor)
+	}
+	return p
 }
 
 // supportsKittyGraphics reports whether the client terminal implements the
@@ -197,47 +199,4 @@ func GetEnv(name, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func getSSHTermInfo(term, colorTerm, termProgram string) termenv.Profile {
-	term = strings.ToLower(term)
-	colorTerm = strings.ToLower(colorTerm)
-
-	switch strings.ToLower(termProgram) {
-	case "iterm2", "iterm.app", "kitty", "ghostty", "wezterm":
-		return termenv.TrueColor
-	}
-
-	switch colorTerm {
-	case "24bit", "truecolor":
-		return termenv.TrueColor
-	case "yes", "true":
-		return termenv.ANSI256
-	}
-
-	switch term {
-	case
-		"alacritty",
-		"contour",
-		"foot",
-		"rio",
-		"wezterm",
-		"xterm-ghostty",
-		"xterm-kitty":
-		return termenv.TrueColor
-	case "linux", "xterm":
-		return termenv.ANSI
-	}
-
-	if strings.Contains(term, "256color") {
-		return termenv.ANSI256
-	}
-	if strings.Contains(term, "color") {
-		return termenv.ANSI
-	}
-	if strings.Contains(term, "ansi") {
-		return termenv.ANSI
-	}
-
-	return termenv.Ascii
 }

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/colorprofile"
 	chafa "github.com/ploMP4/chafa-go"
 	xdraw "golang.org/x/image/draw"
 )
@@ -21,13 +21,13 @@ func fitCells(imgW, imgH, boxCols, boxRows int) (cols, rows int) {
 	return fitImage(imgW, imgH/2, boxCols, boxRows)
 }
 
-func canvasMode(p termenv.Profile) chafa.CanvasMode {
+func canvasMode(p colorprofile.Profile) chafa.CanvasMode {
 	switch p {
-	case termenv.TrueColor:
+	case colorprofile.TrueColor:
 		return chafa.CHAFA_CANVAS_MODE_TRUECOLOR
-	case termenv.ANSI256:
+	case colorprofile.ANSI256:
 		return chafa.CHAFA_CANVAS_MODE_INDEXED_240
-	case termenv.ANSI:
+	case colorprofile.ANSI:
 		return chafa.CHAFA_CANVAS_MODE_INDEXED_16
 	default:
 		return chafa.CHAFA_CANVAS_MODE_FGBG
@@ -155,6 +155,10 @@ func kittyVirtualPlacement(cols, rows int) string {
 // image id rides in the foreground color), so bubbletea's renderer can diff,
 // truncate, and reposition it safely — unlike raw graphics escapes, which it
 // mangles.
+//
+// The id survives only at a truecolor profile: the v2 renderer converts colors
+// on the way out, and a downsampled foreground is a different image id. That
+// holds because the only terminals we enable graphics for are truecolor ones.
 func kittyPlaceholders(cols, rows int) string {
 	cols = min(cols, len(kittyDiacritics))
 	rows = min(rows, len(kittyDiacritics))
@@ -172,11 +176,6 @@ func kittyPlaceholders(cols, rows int) string {
 		s.WriteString("\x1b[39m")
 	}
 	return s.String()
-}
-
-// osc52Copy writes text to the client terminal's clipboard.
-func osc52Copy(text string) string {
-	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07"
 }
 
 func boolToInt(b bool) int {
