@@ -1,0 +1,10 @@
+[Unit]
+Description=airlock.space SSH APOD socket
+
+[Socket]
+ListenStream=0.0.0.0:22
+# keystrokes are the payload here; Nagle would batch them
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target
