@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	chafa "github.com/ploMP4/chafa-go"
+	"github.com/kamaln7/airlock.space/internal/chafa"
 )
 
 func TestRenderSextant(t *testing.T) {
@@ -22,7 +22,10 @@ func TestRenderSextant(t *testing.T) {
 		}
 	}
 
-	out := renderSextant(img, 20, 10, chafa.CHAFA_CANVAS_MODE_TRUECOLOR)
+	out, err := renderSextant(img, 20, 10, chafa.TrueColor)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if out == "" {
 		t.Fatal("empty render")
 	}
@@ -42,7 +45,10 @@ func TestRenderSextant(t *testing.T) {
 			big.Set(x, y, color.NRGBA{R: uint8(x), G: uint8(y), B: 200, A: 255})
 		}
 	}
-	out = renderSextant(big, 40, 25, chafa.CHAFA_CANVAS_MODE_TRUECOLOR)
+	out, err = renderSextant(big, 40, 25, chafa.TrueColor)
+	if err != nil {
+		t.Fatal(err)
+	}
 	lines = strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	if len(lines) != 25 {
 		t.Fatalf("large source rendered %d rows, want 25", len(lines))

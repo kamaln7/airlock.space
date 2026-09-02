@@ -5,14 +5,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
-	"image/draw"
 	"image/png"
 	"math"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/colorprofile"
-	chafa "github.com/ploMP4/chafa-go"
+	"github.com/kamaln7/airlock.space/internal/chafa"
 	xdraw "golang.org/x/image/draw"
 )
 
@@ -26,60 +25,30 @@ func fitCells(imgW, imgH, boxCols, boxRows int, cellAspect float64) (cols, rows 
 	return fitImage(imgW, int(math.Round(float64(imgH)/cellAspect)), boxCols, boxRows)
 }
 
-func canvasMode(p colorprofile.Profile) chafa.CanvasMode {
+func canvasMode(p colorprofile.Profile) chafa.Mode {
 	switch p {
 	case colorprofile.TrueColor:
-		return chafa.CHAFA_CANVAS_MODE_TRUECOLOR
+		return chafa.TrueColor
 	case colorprofile.ANSI256:
-		return chafa.CHAFA_CANVAS_MODE_INDEXED_240
+		return chafa.Indexed240
 	case colorprofile.ANSI:
-		return chafa.CHAFA_CANVAS_MODE_INDEXED_16
+		return chafa.Indexed16
 	default:
-		return chafa.CHAFA_CANVAS_MODE_FGBG
+		return chafa.FgBg
 	}
 }
 
-// A sextant cell is two sub-cells across and three down, so that is all the
-// detail chafa can use. Oversampling a little gives it something to average
-// per sub-cell; past that the pixels are thrown away inside it. Measured on a
-// 61x38 render: three is two and a half times quicker than handing over the
-// whole picture, six is a wash, and twelve is three times slower.
-const sextantOversample = 3
-
 // renderSextant converts img to sextant-glyph art of exactly cols x rows cells.
-func renderSextant(img image.Image, cols, rows int, mode chafa.CanvasMode) string {
-	// Down to what the art can actually show, first. Handing chafa the whole
-	// picture means copying it into a fresh buffer at full size - seven
-	// megabytes for a photograph, to draw a few hundred cells - and then
-	// making chafa throw almost all of it away. A 45x28 render needs 270x252.
-	if w, h := fitImage(img.Bounds().Dx(), img.Bounds().Dy(),
-		cols*2*sextantOversample, rows*3*sextantOversample); w >= 1 && h >= 1 &&
-		(w < img.Bounds().Dx() || h < img.Bounds().Dy()) {
-		small := image.NewNRGBA(image.Rect(0, 0, w, h))
-		xdraw.ApproxBiLinear.Scale(small, small.Bounds(), img, img.Bounds(), xdraw.Src, nil)
-		img = small
-	}
-
-	bounds := img.Bounds()
-	rgba := image.NewNRGBA(bounds)
-	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
-
-	symbolMap := chafa.SymbolMapNew()
-	defer chafa.SymbolMapUnref(symbolMap)
-	chafa.SymbolMapAddByTags(symbolMap, chafa.CHAFA_SYMBOL_TAG_SEXTANT)
-
-	config := chafa.CanvasConfigNew()
-	defer chafa.CanvasConfigUnref(config)
-	chafa.CanvasConfigSetGeometry(config, int32(cols), int32(rows))
-	chafa.CanvasConfigSetCanvasMode(config, mode)
-	chafa.CanvasConfigSetSymbolMap(config, symbolMap)
-
-	canvas := chafa.CanvasNew(config)
-	defer chafa.CanvasUnRef(canvas)
-	chafa.CanvasDrawAllPixels(canvas, chafa.CHAFA_PIXEL_RGBA8_UNASSOCIATED,
-		rgba.Pix, int32(bounds.Dx()), int32(bounds.Dy()), int32(rgba.Stride))
-
-	return chafa.CanvasPrint(canvas, nil).String()
+//
+// The picture goes in whole. We used to shrink it first, to about the detail a
+// sextant cell can hold, because handing the C library a photograph meant
+// copying it at full size and then watching it throw nearly all of it away -
+// which cost more than the shrinking did. Our own renderer scales the way
+// chafa does, pulling source rows on demand, so there is nothing left to save
+// by shrinking first, and the picture it draws is now the one chafa would
+// draw rather than an approximation of it.
+func renderSextant(img image.Image, cols, rows int, mode chafa.Mode) (string, error) {
+	return chafa.Render(img, chafa.Options{Cols: cols, Rows: rows, Mode: mode})
 }
 
 // renderCache shares rendered frames across all sessions: everyone is looking
@@ -94,14 +63,14 @@ var renderCache = struct {
 	entries map[string]string
 }{entries: map[string]string{}}
 
-func sextantKey(date string, cols, rows int, mode chafa.CanvasMode) string {
+func sextantKey(date string, cols, rows int, mode chafa.Mode) string {
 	return fmt.Sprintf("%s|%dx%d|%d", date, cols, rows, mode)
 }
 
 // sextantCached returns a render already in hand, and says whether there was
 // one. Drawing art costs a jpeg decode and a pass through chafa, so while the
 // window is still moving the answer to a miss is to wait, not to render.
-func sextantCached(date string, cols, rows int, mode chafa.CanvasMode) (string, bool) {
+func sextantCached(date string, cols, rows int, mode chafa.Mode) (string, bool) {
 	renderCache.Lock()
 	defer renderCache.Unlock()
 	s, ok := renderCache.entries[sextantKey(date, cols, rows, mode)]
@@ -109,7 +78,7 @@ func sextantCached(date string, cols, rows int, mode chafa.CanvasMode) (string, 
 }
 
 // decodeFn matches apod.(*APOD).Decode: decode fresh, drop after render.
-func cachedSextant(date string, decode func() (image.Image, error), cols, rows int, mode chafa.CanvasMode) (string, error) {
+func cachedSextant(date string, decode func() (image.Image, error), cols, rows int, mode chafa.Mode) (string, error) {
 	key := sextantKey(date, cols, rows, mode)
 
 	if s, ok := sextantCached(date, cols, rows, mode); ok {
@@ -120,7 +89,10 @@ func cachedSextant(date string, decode func() (image.Image, error), cols, rows i
 	if err != nil {
 		return "", err
 	}
-	s := renderSextant(img, cols, rows, mode)
+	s, err := renderSextant(img, cols, rows, mode)
+	if err != nil {
+		return "", err
+	}
 
 	renderCache.Lock()
 	if len(renderCache.entries) >= maxRenders {
