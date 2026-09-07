@@ -147,7 +147,8 @@ func newAPOD(img *nasa.Image) *APOD {
 
 var youtubeIDRegexp = regexp.MustCompile(`(?:youtube\.com/(?:watch\?v=|embed/)|youtu\.be/)([\w-]{11})`)
 
-// imageURLs returns candidate URLs to try in order. Video days on youtube get
+// imageURLs returns candidate URLs to try in order. The small APOD url is
+// first; HD is only a fallback if that fetch fails. Video days on youtube get
 // their thumbnail; directly-hosted videos (mp4) have no image and will fail.
 func (a *APOD) imageURLs() []string {
 	if m := youtubeIDRegexp.FindStringSubmatch(a.URL + " " + a.HDURL); m != nil {
@@ -322,6 +323,17 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 	return nil, lastErr
 }
 
+// imageClient is isolated from http.DefaultClient so other packages cannot
+// change our pool. MaxIdleConnsPerHost stays at Go's default of 2: one GET of
+// the 960px file per day, then disk. Extra idle sockets would never be reused.
+var imageClient = newImageClient()
+
+func newImageClient() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 2
+	return &http.Client{Transport: t}
+}
+
 func fetchImage(ctx context.Context, url string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
 	defer cancel()
@@ -330,7 +342,7 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := imageClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("downloading image: %w", err)
 	}

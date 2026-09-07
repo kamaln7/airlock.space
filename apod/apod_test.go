@@ -97,6 +97,27 @@ func TestVideoDayIsRecordedWithoutAnImageFile(t *testing.T) {
 	}
 }
 
+func TestImageURLsPrefersTheSmallFileOverHD(t *testing.T) {
+	a := newAPOD(&nasa.Image{
+		URL:   "https://apod.nasa.gov/apod/image/2609/PlutoEnhancedHiRes_NewHorizons_960.jpg",
+		HDURL: "https://apod.nasa.gov/apod/image/2609/PlutoEnhancedHiRes_NewHorizons_5000.jpg",
+	})
+	got := a.imageURLs()
+	if len(got) != 2 || !strings.HasSuffix(got[0], "_960.jpg") || !strings.HasSuffix(got[1], "_5000.jpg") {
+		t.Fatalf("imageURLs() = %v; want small file first, HD fallback", got)
+	}
+}
+
+func TestImageClientKeepsTwoIdleConnsPerHost(t *testing.T) {
+	tr, ok := imageClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", imageClient.Transport)
+	}
+	if tr.MaxIdleConnsPerHost != 2 {
+		t.Errorf("MaxIdleConnsPerHost = %d; want 2", tr.MaxIdleConnsPerHost)
+	}
+}
+
 func TestCacheFileRejectsADateThatIsNotOne(t *testing.T) {
 	cacheDir = t.TempDir()
 	defer func() { cacheDir = imageCacheDir() }()
