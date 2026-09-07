@@ -24,19 +24,23 @@ photograph.
 NASAKEY=... go run ./cmd/airlockspace
 ```
 
-`NASAKEY` is your [NASA API key](https://api.nasa.gov/) — free, instant, no
-approval. Without one it falls back to NASA's shared `DEMO_KEY`, which is
-capped at 30 requests an hour per IP: fine for a look around, not for anything
-other people use.
+`NASAKEY` is your [NASA API key](https://api.nasa.gov/). Without one it falls
+back to NASA's shared `DEMO_KEY`, which is severely rate-limited. Obtaining a
+key from NASA takes two minutes -- highly recommended :)
 
 ## Self-hosting
 
-`airlocksshd` runs as a systemd service with `DynamicUser=yes` - a transient unprivileged user.
+### NixOS
 
-`airlocksshd.socket` allow systemctl to bind to port 22 and hand the listener over to airlocksshd
+Nix package, NixOS module, socket activation, and systemd credentials: [NixOS deployment](docs/nixos-deployment.md).
+
+### systemd
+
+* `airlocksshd` runs as a systemd service with `DynamicUser=yes` - a transient unprivileged user.
+* `airlocksshd.socket` allow systemctl to bind to port 22 and hand the listener over to airlocksshd
 without granting it elevated privileges.
 
-Move your ssh server to another port (`/etc/ssh/sshd_config`) or change the port in `airlocksshd.socket`.
+Move your ssh server to another port (`/etc/ssh/sshd_config`) or change airlock's port in `airlocksshd.socket`.
 
 ### Installation
 

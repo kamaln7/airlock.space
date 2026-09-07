@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,10 @@ var (
 )
 
 func main() {
+	if err := loadNASAAPIKey(); err != nil {
+		log.Fatal("could not load NASA API key credential", "error", err)
+	}
+
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(GetEnv("SSH_HOST_KEY", ".airlocksshd/id_ed25519")),
@@ -215,4 +221,33 @@ func GetEnv(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+const nasaAPIKeyCredential = "nasa-api-key"
+
+// loadNASAAPIKey copies a systemd nasa-api-key credential into NASAKEY.
+// NASA_API_KEY or NASAKEY already set wins; missing credential keeps the
+// NASA client's DEMO_KEY fallback.
+// ponytail: peteretelej/nasa's package-level helpers only read env, so the
+// credential has to become NASAKEY before the first fetch. Pass WithAPIKey
+// into apod if we stop using those helpers.
+func loadNASAAPIKey() error {
+	if os.Getenv("NASA_API_KEY") != "" || os.Getenv("NASAKEY") != "" {
+		return nil
+	}
+	dir := os.Getenv("CREDENTIALS_DIRECTORY")
+	if dir == "" {
+		return nil
+	}
+	key, err := os.ReadFile(filepath.Join(dir, nasaAPIKeyCredential))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading NASA API key credential: %w", err)
+	}
+	if key := strings.TrimSpace(string(key)); key != "" {
+		return os.Setenv("NASAKEY", key)
+	}
+	return nil
 }
