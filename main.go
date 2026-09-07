@@ -780,6 +780,9 @@ func (m *Model) viewLinkLine() string {
 	if m.copiedRecently {
 		return m.txtYellow().Bold(true).Render("link copied!")
 	}
+	if m.apod == nil {
+		return "" // first fetch failed: the header already says so
+	}
 	link := m.apod.Link()
 	st := m.txtMuted()
 	if m.hoverLink {
@@ -794,6 +797,9 @@ type msgCopyExpired struct{}
 
 // copyLink puts the APOD link on the client clipboard and shows brief feedback.
 func (m *Model) copyLink() tea.Cmd {
+	if m.apod == nil {
+		return nil
+	}
 	m.copiedRecently = true
 	return tea.Batch(
 		tea.SetClipboard(m.apod.Link()),

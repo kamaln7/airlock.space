@@ -1117,6 +1117,20 @@ func TestFailedDayKeepsTheCurrentOne(t *testing.T) {
 	}
 }
 
+// a failed first fetch (DNS down, nothing on screen yet) used to panic:
+// State becomes APOD with a nil apod, and hover hit-testing re-renders
+func TestFailedFirstFetchDraws(t *testing.T) {
+	m := &Model{Width: 100, Height: 40}
+	m.Update(apodMsg{}) // date zero, apod nil: the Init path
+	if m.State != StateAPOD {
+		t.Errorf("State = %v; want the error page, not a spinner forever", m.State)
+	}
+	frame := ansi.Strip(m.baseView())
+	if !strings.Contains(frame, "error fetching APOD") {
+		t.Errorf("frame = %q; want the fetch-error copy", frame)
+	}
+}
+
 // the photo is megabytes over ssh; art mode must not pay for it
 func TestPhotoIsOnlySentWhenItWillBeSeen(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))
