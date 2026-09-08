@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,21 +22,24 @@ import (
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/colorprofile"
 	airlockspace "github.com/kamaln7/airlock.space"
+	"github.com/kamaln7/airlock.space/apod"
 )
 
 var (
-	host = GetEnv("SSH_HOST", "localhost")
-	port = GetEnv("SSH_PORT", "23234")
+	host = getenv("SSH_HOST", "localhost")
+	port = getenv("SSH_PORT", "23234")
 )
 
 func main() {
-	if err := loadNASAAPIKey(); err != nil {
-		log.Fatal("could not load NASA API key credential", "error", err)
+	c, err := apod.NewClientFromEnv()
+	if err != nil {
+		log.Fatal("could not load NASA API key", "error", err)
 	}
+	apod.Use(c)
 
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
-		wish.WithHostKeyPath(GetEnv("SSH_HOST_KEY", ".airlocksshd/id_ed25519")),
+		wish.WithHostKeyPath(getenv("SSH_HOST_KEY_PATH", ".airlocksshd/id_ed25519")),
 		// ponytail: flat 1h idle cutoff; per-session activity tracking if long-lived dashboards matter
 		wish.WithIdleTimeout(time.Hour),
 		// charm.land/ssh only reports a PTY for a session it emulates or
@@ -215,39 +216,10 @@ func supportsKittyGraphics(term, termProgram string) bool {
 	return false
 }
 
-func GetEnv(name, fallback string) string {
+func getenv(name, fallback string) string {
 	value := os.Getenv(name)
 	if value == "" {
 		return fallback
 	}
 	return value
-}
-
-const nasaAPIKeyCredential = "nasa-api-key"
-
-// loadNASAAPIKey copies a systemd nasa-api-key credential into NASAKEY.
-// NASA_API_KEY or NASAKEY already set wins; missing credential keeps the
-// NASA client's DEMO_KEY fallback.
-// ponytail: peteretelej/nasa's package-level helpers only read env, so the
-// credential has to become NASAKEY before the first fetch. Pass WithAPIKey
-// into apod if we stop using those helpers.
-func loadNASAAPIKey() error {
-	if os.Getenv("NASA_API_KEY") != "" || os.Getenv("NASAKEY") != "" {
-		return nil
-	}
-	dir := os.Getenv("CREDENTIALS_DIRECTORY")
-	if dir == "" {
-		return nil
-	}
-	key, err := os.ReadFile(filepath.Join(dir, nasaAPIKeyCredential))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading NASA API key credential: %w", err)
-	}
-	if key := strings.TrimSpace(string(key)); key != "" {
-		return os.Setenv("NASAKEY", key)
-	}
-	return nil
 }

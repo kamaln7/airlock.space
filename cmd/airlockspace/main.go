@@ -10,9 +10,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	airlockspace "github.com/kamaln7/airlock.space"
+	"github.com/kamaln7/airlock.space/apod"
 )
 
 func main() {
+	c, err := apod.NewClientFromEnv()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	apod.Use(c)
+
 	// slog must not write to the TUI's terminal: a stray log line scrolls the
 	// screen and desyncs bubbletea's renderer (stale frame fragments)
 	logPath := filepath.Join(os.TempDir(), "airlockspace.log")

@@ -41,6 +41,6 @@ services.openssh.ports = [ 2222 ];
 
 `hostKeyFile` is required. It is airlock's application SSH host key, not the machine's OpenSSH key. Keep the same key across deploys so returning clients do not see a host-key changed warning.
 
-`nasaKeyFile` is optional. The module passes it to the service as the systemd credential `nasa-api-key`. `NASA_API_KEY` or `NASAKEY` in the environment still win; otherwise the NASA client falls back to `DEMO_KEY`.
+`nasaKeyFile` is optional. Without it the NASA client falls back to `DEMO_KEY`. `NASA_API_KEY` in the environment still wins.
 
 The module starts `airlock.socket` on the configured address and port and launches `airlock.service` on demand. `openFirewall = true` opens that TCP port in the NixOS firewall.

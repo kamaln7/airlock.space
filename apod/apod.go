@@ -24,8 +24,11 @@ import (
 	"github.com/peteretelej/nasa"
 )
 
+// live is the process-wide APOD fetcher the TUI calls through Today/ByDate.
+var live = &apod{}
+
 var Today = resolvable.New(
-	(&apod{}).getAPOD,
+	live.getAPOD,
 	resolvable.Retry(3, nil),
 	resolvable.StaleOnError(),
 	resolvable.CacheFor(time.Minute),
@@ -77,9 +80,9 @@ func ByDate(t time.Time) (*APOD, error) {
 		img = rec.APOD // the day is on disk; no reason to ask NASA again
 	} else {
 		var err error
-		img, err = nasa.ApodImage(t) // ponytail: concurrent misses fetch twice, then agree
+		img, err = live.fetchDate(context.Background(), t) // ponytail: concurrent misses fetch twice, then agree
 		if err != nil {
-			return nil, redactAPIKey(err)
+			return nil, err
 		}
 	}
 
@@ -99,28 +102,35 @@ func ByDate(t time.Time) (*APOD, error) {
 }
 
 type apod struct {
+	nasa *nasa.Client
 	last *APOD
 }
 
-func (n *apod) getAPOD(_ context.Context) (*APOD, error) {
-	// nasa.APODToday caches by day itself; we only wrap the result
+// Use sets the NASA client Today/ByDate fetch with. Call once at process start.
+func Use(c *nasa.Client) {
+	if c == nil {
+		c = nasa.NewClient(nasa.WithAPIKey("DEMO_KEY"))
+	}
+	live.nasa = c
+}
+
+func (n *apod) getAPOD(ctx context.Context) (*APOD, error) {
 	var img *nasa.Image
 	var err error
 	if d := os.Getenv("APOD_DATE"); d != "" { // e.g. APOD_DATE=2026-08-29, for testing
 		if n.last != nil && n.last.Date == d {
-			// nasa.ApodImage has no cache (unlike APODToday); skip the refetch
 			return n.last, nil
 		}
 		var t time.Time
 		if t, err = time.Parse(time.DateOnly, d); err != nil {
 			return nil, fmt.Errorf("invalid APOD_DATE: %w", err)
 		}
-		img, err = nasa.ApodImage(t)
+		img, err = n.fetchDate(ctx, t)
 	} else {
-		img, err = nasa.APODToday()
+		img, err = n.fetchToday(ctx)
 	}
 	if err != nil {
-		return nil, redactAPIKey(err)
+		return nil, err
 	}
 	if n.last == nil || n.last.Date != img.Date {
 		slog.Info("new APOD", "date", img.Date)

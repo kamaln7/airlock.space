@@ -8,8 +8,9 @@ NonBlocking=true
 DynamicUser=yes
 StateDirectory=airlocksshd
 WorkingDirectory=/var/lib/airlocksshd
-Environment=SSH_HOST_KEY=/var/lib/airlocksshd/id_ed25519
-# NASAKEY lives here, 0600 root, so it stays out of the unit and out of logs
-EnvironmentFile=/etc/airlocksshd.env
+LoadCredential=ssh-host-key:/etc/airlocksshd/id_ed25519
+LoadCredential=nasa-api-key:/etc/airlocksshd/nasa-api-key
+Environment=SSH_HOST_KEY_PATH=%d/ssh-host-key
+Environment=NASA_API_KEY_PATH=%d/nasa-api-key
 Restart=always
 RestartSec=1s

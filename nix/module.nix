@@ -37,9 +37,8 @@ in
       default = null;
       example = "/run/secrets/airlock-ssh-host-key";
       description = ''
-        Path to airlock's application SSH host key. The module passes this as a
-        systemd credential so DynamicUser does not need direct access to the
-        secret file.
+        Path to airlock's application SSH host key. Passed as a systemd
+        credential so DynamicUser does not need access to the secret file.
       '';
     };
 
@@ -48,8 +47,8 @@ in
       default = null;
       example = "/run/secrets/airlock-nasa-api-key";
       description = ''
-        Path to a NASA API key. The module passes it as the nasa-api-key systemd
-        credential; it is not placed in the Nix store or the unit environment.
+        Path to a NASA API key. Passed as a systemd credential; the service
+        sees it as NASA_API_KEY_PATH.
       '';
     };
   };
@@ -85,7 +84,9 @@ in
         LoadCredential =
           [ "ssh-host-key:${cfg.hostKeyFile}" ]
           ++ lib.optional (cfg.nasaKeyFile != null) "nasa-api-key:${cfg.nasaKeyFile}";
-        Environment = [ "SSH_HOST_KEY=%d/ssh-host-key" ];
+        Environment =
+          [ "SSH_HOST_KEY_PATH=%d/ssh-host-key" ]
+          ++ lib.optional (cfg.nasaKeyFile != null) "NASA_API_KEY_PATH=%d/nasa-api-key";
         Restart = "always";
         RestartSec = "1s";
       };
