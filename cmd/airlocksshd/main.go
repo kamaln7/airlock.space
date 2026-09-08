@@ -146,9 +146,10 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	// discovery: wish's MakeOptions picks the right input, our WithOutput then
 	// replaces the output it chose.
 	out := &oneWriter{w: s}
+	w, h := airlockspace.ClampSize(pty.Window.Width, pty.Window.Height)
 	m := &airlockspace.Model{
-		Width:         pty.Window.Width,
-		Height:        pty.Window.Height,
+		Width:         w,
+		Height:        h,
 		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram(s.Environ())),
 		Session:       out,
 		WidthPixels:   pty.Window.WidthPixels,

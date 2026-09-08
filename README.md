@@ -56,7 +56,7 @@ without granting it elevated privileges.
   ssh-keygen -t ed25519 -f /etc/airlocksshd/id_ed25519 -N ''
   ```
 
-  Keep this same host key across deploys so clients do't see a host-key mismatch warning.
+  Keep this same host key across deploys so clients don't see a host-key mismatch warning.
 
 3. Add your API key:
 
@@ -84,7 +84,7 @@ the socket keeps listening across the restart.
 
 Run `airlocksshd` however you like. It:
 
-* reads the NASA API key from `NASA_API_KEY` (value) or `NASA_API_KEY` (file path)
+* reads the NASA API key from `NASA_API_KEY` (value) or `NASA_API_KEY_PATH` (file path)
 * falls back to binding to `SSH_HOST`:`SSH_PORT` itself (`localhost:23234`)
 * keeps its host key at `SSH_HOST_KEY_PATH` (`.airlocksshd/id_ed25519`, generated on first start)
 * caches source images under `STATE_DIRECTORY` or your user cache dir

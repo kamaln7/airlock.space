@@ -85,6 +85,7 @@ in
       after = [ "network.target" ];
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/airlocksshd";
+        NonBlocking = true;
         DynamicUser = true;
         StateDirectory = "airlock";
         WorkingDirectory = "/var/lib/airlock";

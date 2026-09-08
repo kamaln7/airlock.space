@@ -1192,3 +1192,14 @@ func TestPhotoToggleOfferedBeforeTheUpload(t *testing.T) {
 		t.Errorf("footer %q offers no p toggle", keys)
 	}
 }
+
+func TestHugeWindowIsClamped(t *testing.T) {
+	m := &Model{}
+	m.Update(tea.WindowSizeMsg{Width: 65535, Height: 65535})
+	if m.Width != maxCols || m.Height != maxRows {
+		t.Fatalf("got %dx%d, want %dx%d", m.Width, m.Height, maxCols, maxRows)
+	}
+	if got := len(m.render()); got > 4<<20 {
+		t.Fatalf("frame is %d bytes for a clamped window", got)
+	}
+}

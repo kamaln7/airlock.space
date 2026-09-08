@@ -172,6 +172,17 @@ type msgResized struct {
 	kind settleKind
 }
 
+// The terminal size is the client's word, and every frame costs cells
+// proportional to it: 4000x4000 is 94MB of allocation a frame, and the ssh
+// window fields go to 65535. Nothing real is wider than a 4K display in a
+// six-pixel font, which is about 640 columns.
+const maxCols, maxRows = 1000, 300
+
+// ClampSize bounds a client-reported terminal size to what this box will draw.
+func ClampSize(w, h int) (int, int) {
+	return min(w, maxCols), min(h, maxRows)
+}
+
 func spinTick() tea.Cmd {
 	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
 }
@@ -191,7 +202,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.trueW, m.trueH = msg.Width, msg.Height
+		m.trueW, m.trueH = ClampSize(msg.Width, msg.Height)
 		m.resizing = true
 		m.resizeGen++
 		gen := m.resizeGen
