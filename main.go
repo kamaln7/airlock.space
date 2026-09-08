@@ -400,6 +400,9 @@ func (m *Model) reflow() {
 // First and nothing after the latest post. Loading takes a moment, so the
 // spinner comes back while it does.
 func (m *Model) showDay(date time.Time) tea.Cmd {
+	if m.State == StateLoading {
+		return nil // one NASA/image fetch at a time; key-repeat would otherwise pile up
+	}
 	if m.apod == nil || date.Before(apod.First) || date.After(m.latest) {
 		return nil
 	}

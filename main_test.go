@@ -188,6 +188,18 @@ func TestDayNavigationStaysInRange(t *testing.T) {
 	}
 }
 
+func TestShowDayIgnoresKeysWhileLoading(t *testing.T) {
+	m := testModel(t, day(2026, 8, 31))
+	press(m, tea.KeyLeft)
+	if !m.date.Equal(day(2026, 8, 30)) {
+		t.Fatalf("first left = %v; want 2026-08-30", m.date)
+	}
+	press(m, tea.KeyLeft)
+	if !m.date.Equal(day(2026, 8, 30)) {
+		t.Errorf("second left while loading = %v; want to stay on 2026-08-30", m.date)
+	}
+}
+
 func TestDayNavigationInHeader(t *testing.T) {
 	nav := func(m *Model) string { return ansi.Strip(m.viewNav(100)) }
 

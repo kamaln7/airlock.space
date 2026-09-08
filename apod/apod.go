@@ -22,6 +22,7 @@ import (
 
 	"github.com/kamaln7/resolvable/v2"
 	"github.com/peteretelej/nasa"
+	"golang.org/x/sync/singleflight"
 )
 
 // live is the process-wide APOD fetcher the TUI calls through Today/ByDate.
@@ -62,6 +63,10 @@ var days = struct {
 	order  []string
 }{byDate: map[string]*APOD{}}
 
+// dateFlight coalesces concurrent ByDate misses for the same day.
+// resolvable already does this for Today and per-day ImageBytes; ByDate is a map.
+var dateFlight singleflight.Group
+
 // ByDate resolves the APOD posted on a given day. Past days never change, so
 // each is fetched once and reused, which is what makes stepping back and forth
 // through history instant.
@@ -75,30 +80,43 @@ func ByDate(t time.Time) (*APOD, error) {
 		return a, nil
 	}
 
-	var img *nasa.Image
-	if rec := loadDay(key); rec != nil {
-		img = rec.APOD // the day is on disk; no reason to ask NASA again
-	} else {
-		var err error
-		img, err = live.fetchDate(context.Background(), t) // ponytail: concurrent misses fetch twice, then agree
-		if err != nil {
-			return nil, err
+	v, err, _ := dateFlight.Do(key, func() (any, error) {
+		days.Lock()
+		if a, ok := days.byDate[key]; ok {
+			days.Unlock()
+			return a, nil
 		}
-	}
+		days.Unlock()
 
-	days.Lock()
-	defer days.Unlock()
-	if existing, ok := days.byDate[key]; ok {
-		return existing, nil // lost the race; one instance per day
+		var img *nasa.Image
+		if rec := loadDay(key); rec != nil {
+			img = rec.APOD // the day is on disk; no reason to ask NASA again
+		} else {
+			var err error
+			img, err = live.fetchDate(context.Background(), t)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		days.Lock()
+		defer days.Unlock()
+		if existing, ok := days.byDate[key]; ok {
+			return existing, nil
+		}
+		a := newAPOD(img)
+		days.byDate[key] = a
+		days.order = append(days.order, key)
+		for len(days.order) > daysInMemory {
+			delete(days.byDate, days.order[0])
+			days.order = days.order[1:]
+		}
+		return a, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	a = newAPOD(img)
-	days.byDate[key] = a
-	days.order = append(days.order, key)
-	for len(days.order) > daysInMemory {
-		delete(days.byDate, days.order[0])
-		days.order = days.order[1:]
-	}
-	return a, nil
+	return v.(*APOD), nil
 }
 
 type apod struct {
@@ -338,6 +356,9 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 // the 960px file per day, then disk. Extra idle sockets would never be reused.
 var imageClient = newImageClient()
 
+// ponytail: 32 in-flight JPEGs; drop this if apod.nasa.gov or the box complains.
+var imageSlots = make(chan struct{}, 32)
+
 func newImageClient() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConnsPerHost = 2
@@ -345,6 +366,13 @@ func newImageClient() *http.Client {
 }
 
 func fetchImage(ctx context.Context, url string) ([]byte, error) {
+	select {
+	case imageSlots <- struct{}{}:
+		defer func() { <-imageSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
 	defer cancel()
 

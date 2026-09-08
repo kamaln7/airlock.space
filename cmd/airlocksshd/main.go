@@ -40,8 +40,8 @@ func main() {
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(getenv("SSH_HOST_KEY_PATH", ".airlocksshd/id_ed25519")),
-		// ponytail: flat 1h idle cutoff; per-session activity tracking if long-lived dashboards matter
-		wish.WithIdleTimeout(time.Hour),
+		// ponytail: flat 15m idle cutoff; per-session activity tracking if long-lived dashboards matter
+		wish.WithIdleTimeout(15*time.Minute),
 		// charm.land/ssh only reports a PTY for a session it emulates or
 		// allocates one for; without this Pty() says no and activeterm turns
 		// every client away. Emulated is what v1 did implicitly.

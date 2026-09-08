@@ -2,13 +2,17 @@ package apod
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/peteretelej/nasa"
 )
@@ -106,6 +110,99 @@ func TestImageURLsPrefersTheSmallFileOverHD(t *testing.T) {
 	if len(got) != 2 || !strings.HasSuffix(got[0], "_960.jpg") || !strings.HasSuffix(got[1], "_5000.jpg") {
 		t.Fatalf("imageURLs() = %v; want small file first, HD fallback", got)
 	}
+}
+
+func TestByDateCoalescesConcurrentMisses(t *testing.T) {
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = imageCacheDir() }()
+
+	var hits atomic.Int32
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-block
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"date":"2026-08-30","title":"t","url":"http://x/a.jpg","explanation":"e"}`))
+	}))
+	defer srv.Close()
+
+	days.Lock()
+	days.byDate = map[string]*APOD{}
+	days.order = nil
+	days.Unlock()
+	old := live.nasa
+	live.nasa = nasa.NewClient(nasa.WithBaseURL(srv.URL), nasa.WithAPIKey("test"), nasa.WithRateLimit(100))
+	defer func() { live.nasa = old }()
+
+	day := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	errc := make(chan error, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ByDate(day)
+			errc <- err
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for hits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("NASA hits while blocked = %d; want 1", got)
+	}
+	close(block)
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("NASA hits after join = %d; want 1", got)
+	}
+}
+
+func TestFetchImageCapsConcurrency(t *testing.T) {
+	var inflight, max atomic.Int32
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inflight.Add(1)
+		for {
+			m := max.Load()
+			if n <= m || max.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		<-gate
+		inflight.Add(-1)
+		w.Header().Set("Content-Type", "image/png")
+	}))
+	defer srv.Close()
+
+	var wg sync.WaitGroup
+	for range cap(imageSlots) + 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = fetchImage(context.Background(), srv.URL)
+		}()
+	}
+	want := int32(cap(imageSlots))
+	deadline := time.Now().Add(2 * time.Second)
+	for max.Load() < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := max.Load(); got != want {
+		close(gate)
+		wg.Wait()
+		t.Fatalf("max in-flight image GETs = %d; want %d", got, want)
+	}
+	close(gate)
+	wg.Wait()
 }
 
 func TestImageClientKeepsTwoIdleConnsPerHost(t *testing.T) {
