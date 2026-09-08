@@ -1203,3 +1203,29 @@ func TestHugeWindowIsClamped(t *testing.T) {
 		t.Fatalf("frame is %d bytes for a clamped window", got)
 	}
 }
+
+// the title is centered on the screen, not on the content box: that box is as
+// wide as the picture turns out to be, so it would otherwise shift once the
+// picture's size is known - and again on a wide day, which stacks the layout
+func TestTitleHoldsItsColumnWhilePictureLoads(t *testing.T) {
+	m := besideImage(t, 151, 40) // odd: the two boxes used to round their centres apart
+	titleCol := func() int {
+		t.Helper()
+		for _, l := range strings.Split(m.baseView(), "\n") {
+			if s, _, ok := columnSpan(ansi.Strip(l), m.apod.Title); ok {
+				return s
+			}
+		}
+		t.Fatal("no title row")
+		return -1
+	}
+	m.imageLoading, m.imageOK = true, false
+	loading := titleCol()
+	m.imageLoading, m.imageOK = false, true
+	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}} {
+		m.apod.ImageSize = sz
+		if got := titleCol(); got != loading {
+			t.Errorf("picture %v: title at column %d; was %d while loading", sz, got, loading)
+		}
+	}
+}

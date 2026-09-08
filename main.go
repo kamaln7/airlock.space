@@ -504,7 +504,7 @@ func (m *Model) cellPixels() (w, h int) {
 
 // photoChrome is the rows the page keeps for itself around the picture: the
 // header block, the link and the help bar, with their blank lines.
-const photoChrome = 12
+const photoChrome = 10
 
 // photoBox is the device-pixel box the photo is encoded for - the cells it
 // will actually be drawn into, not the whole terminal. In the main view that
@@ -697,12 +697,8 @@ func (m *Model) viewAPOD() string {
 
 	// how many rows the body has, measured against the widest the content
 	// could be. Wide enough for a picture beside the text, the header is a
-	// fixed five rows, so this does not shift under the layout it decides.
-	probeW := textW
-	if room >= imageMinWidth {
-		probeW = textW + paneGap + room
-	}
-	chrome := countLines(m.viewAPODText(probeW)) + countLines(linkBlock) + countLines(helpView) + 2
+	// fixed three rows, so this does not shift under the layout it decides.
+	chrome := countLines(m.viewAPODText(m.Width)) + countLines(linkBlock) + countLines(helpView) + 2
 	bodyH := max(3, m.Height-chrome)
 
 	// the picture's column is sized to the picture, not the other way round: a
@@ -754,8 +750,7 @@ func (m *Model) viewAPOD() string {
 	// not change, so the rows budgeted above still hold.
 	helpView = m.viewHelp()
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		m.viewAPODText(contentW),
+	page := lipgloss.JoinVertical(lipgloss.Left,
 		// the body holds the rows it was given whether or not it fills them,
 		// so a video day - explanation and nothing beside it - sits where a
 		// day with a picture does, top-aligned, rather than floating to the
@@ -768,6 +763,13 @@ func (m *Model) viewAPOD() string {
 	// Place centers every line, so the explanation's own columns shift by the
 	// same margin the content box does
 	m.explCol += (m.Width - contentW) / 2
+	// the header is centered on the screen, not on the content box: that box
+	// is as wide as the picture turns out to be, so the title would otherwise
+	// shift once the picture's size is known and the column beside the text
+	// narrows to fit it
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		m.viewAPODText(m.Width),
+		lipgloss.PlaceHorizontal(m.Width, lipgloss.Center, page))
 	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
 }
 
@@ -795,7 +797,7 @@ func (m *Model) viewLinkLine() string {
 		return m.txtYellow().Bold(true).Render("link copied!")
 	}
 	if m.apod == nil {
-		return "" // first fetch failed: the header already says so
+		return "" // first fetch failed: the page already says so
 	}
 	link := m.apod.Link()
 	st := m.txtMuted()
@@ -1514,32 +1516,16 @@ func (m *Model) txtArrow(key string) lipgloss.Style {
 	return m.txtMuted()
 }
 
-// viewAPODText renders the header block: the app name, the calendar and the
-// title. The explanation is its own scrolling block - see viewExplanation.
+// viewAPODText renders the header block: the calendar and the title. The
+// explanation is its own scrolling block - see viewExplanation.
 func (m *Model) viewAPODText(width int) string {
-	var s strings.Builder
-
-	header := m.txtMuted().Render("🌌 Astronomy Picture of the Day")
-
 	if m.apod == nil {
-		s.WriteString(header)
-		s.WriteString("\n")
-		s.WriteString(txt.Render("error fetching APOD :("))
-		s.WriteString("\n")
-		return s.String()
+		return txt.Render("error fetching APOD :(") + "\n"
 	}
-
 	// calendar over title, both centered, on rows of their own: with a date on
-	// each arrow the day line is too wide to share one with the header, so the
-	// flexbox the title used to do would only ever have collapsed - and jumped
-	// between days as it did
+	// each arrow the day line is too wide to share one with anything else
 	title := hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
-	s.WriteString(header)
-	s.WriteString("\n\n")
-	s.WriteString(txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width) + "\n" + title))
-	s.WriteString("\n\n")
-
-	return s.String()
+	return txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width)+"\n"+title) + "\n\n"
 }
 
 func colorize(str string, colors ...color.Color) string {
