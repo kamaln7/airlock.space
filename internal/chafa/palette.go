@@ -108,21 +108,6 @@ func colorDiffFast(a, b color) int {
 	return d0*d0 + d1*d1 + d2*d2
 }
 
-// colorAverage2 is chafa_color_average_2(): per-byte (a>>1) + (b>>1).
-func colorAverage2(a, b color) color {
-	au := colorToU32(a)
-	bu := colorToU32(b)
-	return u32ToColor(((au >> 1) & 0x7f7f7f7f) + ((bu >> 1) & 0x7f7f7f7f))
-}
-
-func colorToU32(c color) uint32 {
-	return uint32(c.ch[0]) | uint32(c.ch[1])<<8 | uint32(c.ch[2])<<16 | uint32(c.ch[3])<<24
-}
-
-func u32ToColor(u uint32) color {
-	return color{[4]uint8{uint8(u), uint8(u >> 8), uint8(u >> 16), uint8(u >> 24)}}
-}
-
 const maxInt32 = int(^uint32(0) >> 1)
 
 type colorCandidates struct {

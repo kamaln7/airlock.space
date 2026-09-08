@@ -264,12 +264,3 @@ func findCandidates(bitmap uint64, doInverse bool, out []candidate, nWanted int)
 	copy(out[:n], candidates[:n])
 	return n
 }
-
-func symbolMapHasSymbol(c rune) bool {
-	for i := range sextantSymbols {
-		if sextantSymbols[i].c == c {
-			return true
-		}
-	}
-	return false
-}
