@@ -1,0 +1,3 @@
+[hook "vendor-hash"]
+	command = .githooks/pre-commit
+	event = pre-commit

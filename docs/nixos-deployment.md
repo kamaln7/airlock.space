@@ -5,6 +5,16 @@ Flake outputs:
 - `packages.<system>.default` — `airlocksshd`
 - `nixosModules.default` — socket-activated `DynamicUser` service
 
+`vendorHash` in `nix/package.nix` must match `go.sum`. After `go mod tidy`:
+
+```sh
+make update-vendor-hash   # rewrite the hash
+make ci                   # check it (host nix, or Colima if nix is not on PATH)
+make hooks                # once per clone: include .gitconfig named hook
+```
+
+The pre-commit hook is a Git 2.36+ named hook (`hook.vendor-hash`) in `.gitconfig`. `make hooks` sets `include.path`; Git will not enable it on clone by itself. `./nix/vendor-hash.sh` uses host `nix` if present, otherwise the Colima VM (repo is virtiofs-mounted at the same path).
+
 ## Flake input
 
 ```nix

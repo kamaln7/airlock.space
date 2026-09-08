@@ -5,7 +5,7 @@ buildGoModule {
   version = "0-unstable";
   src = ../.;
 
-  vendorHash = "sha256-0hI56m3BQF6npsszVpoBF0TYQ6AyhF1brHgWLnKPz84=";
+  vendorHash = "sha256-oHyuhC5sKKd/Sc3Ro8EefoDC8Un0PffU1lx+SCMAjXI=";
 
   subPackages = [ "cmd/airlocksshd" ];
   env.CGO_ENABLED = 0;

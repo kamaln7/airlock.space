@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs when go.mod / go.sum / the Nix package files are staged.
+# Enable in a clone with: make hooks
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+if ! git diff --cached --name-only | grep -qE '^(go\.mod|go\.sum|nix/package\.nix|flake\.nix|flake\.lock)$'; then
+  exit 0
+fi
+
+if [ -n "${NIX_SKIP_VENDOR_HASH:-}" ]; then
+  echo "pre-commit: NIX_SKIP_VENDOR_HASH set, skipping vendorHash check" >&2
+else
+  ./nix/vendor-hash.sh check
+fi
+
+# The check reads the worktree. Don't let a hash rewrite sit unstaged
+# while go.sum is committed.
+if [ -n "$(git diff --name-only -- nix/package.nix)" ]; then
+  echo "pre-commit: nix/package.nix has unstaged edits. git add it before committing." >&2
+  exit 1
+fi
