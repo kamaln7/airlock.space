@@ -14,12 +14,10 @@ import (
 )
 
 func main() {
-	c, err := apod.NewClientFromEnv()
-	if err != nil {
+	if err := apod.NewClientFromEnv(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	apod.Use(c)
 
 	// slog must not write to the TUI's terminal: a stray log line scrolls the
 	// screen and desyncs bubbletea's renderer (stale frame fragments)
@@ -49,5 +47,5 @@ func main() {
 		os.Exit(1)
 	}
 	// the model kept the last size the terminal reported
-	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye(m.Width, "local"))
+	colorprofile.NewWriter(os.Stdout, os.Environ()).WriteString(airlockspace.Goodbye(m.Width, "local", m.APOD()))
 }

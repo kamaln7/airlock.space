@@ -31,11 +31,9 @@ var (
 )
 
 func main() {
-	c, err := apod.NewClientFromEnv()
-	if err != nil {
+	if err := apod.NewClientFromEnv(); err != nil {
 		log.Fatal("could not load NASA API key", "error", err)
 	}
-	apod.Use(c)
 
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
@@ -59,7 +57,14 @@ func main() {
 					if pty, _, ok := s.Pty(); ok {
 						cols = pty.Window.Width
 					}
-					w.WriteString(airlockspace.Goodbye(cols, clientKey(s)))
+					var a *apod.APOD
+					if m, ok := s.Context().Value(sessionModelKey{}).(*airlockspace.Model); ok {
+						if m.Width > 0 {
+							cols = m.Width
+						}
+						a = m.APOD()
+					}
+					w.WriteString(airlockspace.Goodbye(cols, clientKey(s), a))
 				}
 			},
 			// middleware runs in reverse order, so activeterm goes last here to
@@ -121,11 +126,14 @@ func (o *oneWriter) Write(p []byte) (int, error) {
 
 // program builds the tea.Program itself, which the default middleware does not
 // allow: it appends its own WithOutput last, and we need ours to win.
+type sessionModelKey struct{}
+
 func program(s ssh.Session) *tea.Program {
 	m, opts := teaHandler(s)
 	if m == nil {
 		return nil
 	}
+	s.Context().SetValue(sessionModelKey{}, m)
 	return tea.NewProgram(m, opts...)
 }
 

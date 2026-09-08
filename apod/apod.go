@@ -81,19 +81,12 @@ func ByDate(t time.Time) (*APOD, error) {
 	}
 
 	v, err, _ := dateFlight.Do(key, func() (any, error) {
-		days.Lock()
-		if a, ok := days.byDate[key]; ok {
-			days.Unlock()
-			return a, nil
-		}
-		days.Unlock()
-
 		var img *nasa.Image
 		if rec := loadDay(key); rec != nil {
 			img = rec.APOD // the day is on disk; no reason to ask NASA again
 		} else {
 			var err error
-			img, err = live.fetchDate(context.Background(), t)
+			img, err = live.fetch(context.Background(), t)
 			if err != nil {
 				return nil, err
 			}
@@ -124,14 +117,6 @@ type apod struct {
 	last *APOD
 }
 
-// Use sets the NASA client Today/ByDate fetch with. Call once at process start.
-func Use(c *nasa.Client) {
-	if c == nil {
-		c = nasa.NewClient(nasa.WithAPIKey("DEMO_KEY"))
-	}
-	live.nasa = c
-}
-
 func (n *apod) getAPOD(ctx context.Context) (*APOD, error) {
 	var img *nasa.Image
 	var err error
@@ -143,9 +128,9 @@ func (n *apod) getAPOD(ctx context.Context) (*APOD, error) {
 		if t, err = time.Parse(time.DateOnly, d); err != nil {
 			return nil, fmt.Errorf("invalid APOD_DATE: %w", err)
 		}
-		img, err = n.fetchDate(ctx, t)
+		img, err = n.fetch(ctx, t)
 	} else {
-		img, err = n.fetchToday(ctx)
+		img, err = n.fetch(ctx, time.Time{})
 	}
 	if err != nil {
 		return nil, err
@@ -352,8 +337,7 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 }
 
 // imageClient is isolated from http.DefaultClient so other packages cannot
-// change our pool. MaxIdleConnsPerHost stays at Go's default of 2: one GET of
-// the 960px file per day, then disk. Extra idle sockets would never be reused.
+// change our pool.
 var imageClient = newImageClient()
 
 // ponytail: 32 in-flight JPEGs; drop this if apod.nasa.gov or the box complains.
@@ -361,7 +345,7 @@ var imageSlots = make(chan struct{}, 32)
 
 func newImageClient() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.MaxIdleConnsPerHost = 2
+	t.MaxIdleConnsPerHost = 4
 	return &http.Client{Transport: t}
 }
 

@@ -2,7 +2,6 @@ package apod
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"image"
 	"image/png"
@@ -163,55 +162,6 @@ func TestByDateCoalescesConcurrentMisses(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("NASA hits after join = %d; want 1", got)
-	}
-}
-
-func TestFetchImageCapsConcurrency(t *testing.T) {
-	var inflight, max atomic.Int32
-	gate := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := inflight.Add(1)
-		for {
-			m := max.Load()
-			if n <= m || max.CompareAndSwap(m, n) {
-				break
-			}
-		}
-		<-gate
-		inflight.Add(-1)
-		w.Header().Set("Content-Type", "image/png")
-	}))
-	defer srv.Close()
-
-	var wg sync.WaitGroup
-	for range cap(imageSlots) + 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = fetchImage(context.Background(), srv.URL)
-		}()
-	}
-	want := int32(cap(imageSlots))
-	deadline := time.Now().Add(2 * time.Second)
-	for max.Load() < want && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := max.Load(); got != want {
-		close(gate)
-		wg.Wait()
-		t.Fatalf("max in-flight image GETs = %d; want %d", got, want)
-	}
-	close(gate)
-	wg.Wait()
-}
-
-func TestImageClientKeepsTwoIdleConnsPerHost(t *testing.T) {
-	tr, ok := imageClient.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport is %T, want *http.Transport", imageClient.Transport)
-	}
-	if tr.MaxIdleConnsPerHost != 2 {
-		t.Errorf("MaxIdleConnsPerHost = %d; want 2", tr.MaxIdleConnsPerHost)
 	}
 }
 

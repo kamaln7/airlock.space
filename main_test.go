@@ -490,7 +490,7 @@ func TestGoodbyeArtIsActuallyVaried(t *testing.T) {
 
 // the goodbye is the art's home now; it has to actually be in there
 func TestGoodbyeCarriesArt(t *testing.T) {
-	out := ansi.Strip(Goodbye(100, "carries"))
+	out := ansi.Strip(Goodbye(100, "carries", nil))
 	if !strings.Contains(out, "thanks for visiting") {
 		t.Fatal("no farewell in the goodbye")
 	}
@@ -507,6 +507,22 @@ func TestGoodbyeCarriesArt(t *testing.T) {
 	}
 	if rows == 0 {
 		t.Errorf("no art rows in the goodbye:\n%s", out)
+	}
+	if strings.Contains(out, "apod.nasa.gov") || strings.Contains(out, "🌌") {
+		t.Errorf("nil APOD should not print title/link:\n%s", out)
+	}
+}
+
+func TestGoodbyeShowsTheDayYouWereOn(t *testing.T) {
+	a := &apod.APOD{Image: &nasa.Image{
+		Title:    "A Test Nebula",
+		ApodDate: day(2026, 8, 30),
+	}}
+	out := ansi.Strip(Goodbye(100, "day", a))
+	for _, want := range []string{"A Test Nebula", "2026-08-30", "apod.nasa.gov"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("goodbye missing %q:\n%s", want, out)
+		}
 	}
 }
 

@@ -15,9 +15,13 @@ in
     };
 
     listenAddress = lib.mkOption {
-      type = lib.types.str;
-      default = "0.0.0.0";
-      description = "Address on which the socket accepts airlock SSH connections.";
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "0.0.0.0";
+      description = ''
+        Address to bind. Null (default) is a bare port: systemd listens on all
+        interfaces, IPv6 dual-stack. Set 0.0.0.0 for IPv4-only, or a specific IP.
+      '';
     };
 
     port = lib.mkOption {
@@ -67,7 +71,10 @@ in
       description = "airlock.space SSH socket";
       wantedBy = [ "sockets.target" ];
       socketConfig = {
-        ListenStream = "${cfg.listenAddress}:${toString cfg.port}";
+        ListenStream =
+          if cfg.listenAddress == null
+          then toString cfg.port
+          else "${cfg.listenAddress}:${toString cfg.port}";
         NoDelay = true;
       };
     };

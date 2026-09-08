@@ -24,7 +24,6 @@ Flake outputs:
   services.airlock = {
     enable = true;
     package = inputs.airlock.packages.${pkgs.stdenv.hostPlatform.system}.default;
-    listenAddress = "0.0.0.0";
     port = 22;
     openFirewall = true;
     hostKeyFile = "/run/secrets/airlock-ssh-host-key";

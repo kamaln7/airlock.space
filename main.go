@@ -1273,7 +1273,7 @@ func countLines(str string) int {
 // Goodbye is printed on exit, outside the alt screen. It writes truecolor
 // escapes; the caller sends them through a colorprofile.Writer, which
 // downsamples them to what the client can show.
-func Goodbye(width int, client string) string {
+func Goodbye(width int, client string, a *apod.APOD) string {
 	if width <= 0 {
 		width = 80 // no size to hand: assume the classic terminal
 	}
@@ -1293,8 +1293,6 @@ func Goodbye(width int, client string) string {
 		art = "\n" + art + "\n"
 	}
 
-	// StaleOnError can return a usable stale APOD alongside an error
-	a, _ := apod.Today()
 	if a == nil {
 		return "\n" + art + msg
 	}
@@ -1305,6 +1303,8 @@ func Goodbye(width int, client string) string {
 		yellow.Render(a.Link()),
 		msg)
 }
+
+func (m *Model) APOD() *apod.APOD { return m.apod }
 
 // artMemory bounds how many clients the goodbye remembers. The log is a
 // nicety on a 512MB box, so it is capped and the least recently seen client is
