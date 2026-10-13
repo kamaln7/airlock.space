@@ -49,7 +49,4 @@ services.openssh.ports = [ 2222 ];
 
 `hostKeyFile` is required. It is airlock's application SSH host key, not the machine's OpenSSH key. Keep the same key across deploys so returning clients do not see a host-key changed warning.
 
-APOD Basic needs no API key. Remove `services.airlock.nasaKeyFile` from existing
-configurations when upgrading; that option and its systemd credential are gone.
-
 The module starts `airlock.socket` on the configured address and port and launches `airlock.service` on demand. `openFirewall = true` opens that TCP port in the NixOS firewall.
