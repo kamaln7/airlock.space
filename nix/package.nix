@@ -1,11 +1,11 @@
-{ lib, buildGoModule }:
+{ lib, buildGo127Module }:
 
-buildGoModule {
+buildGo127Module {
   pname = "airlock.space";
   version = "0-unstable";
   src = ../.;
 
-  vendorHash = "sha256-nHb9IYJyFJxzLoGBREzsHpX1HGBKECySnicSeD/RbQM=";
+  vendorHash = "sha256-oTxb451uYeZZFDdduQi3Y/1EnvOpoHTywoN6uJBU5S0=";
 
   subPackages = [ "cmd/airlocksshd" ];
   env.CGO_ENABLED = 0;

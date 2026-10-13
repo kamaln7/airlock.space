@@ -20,6 +20,8 @@ photograph.
 
 ## Running locally
 
+Requires Go 1.27.2 or newer.
+
 ```sh
 go run ./cmd/airlockspace
 ```
@@ -155,7 +157,6 @@ the socket keeps listening across the restart.
 
 Run `airlocksshd` however you like. It:
 
-* needs no NASA API key; it reads the public APOD Basic feed on science.nasa.gov
 * falls back to binding to `SSH_HOST`:`SSH_PORT` itself (`localhost:23234`)
 * keeps its host key at `SSH_HOST_KEY_PATH` (`.airlocksshd/id_ed25519`, generated on first start)
 * caches source images under `STATE_DIRECTORY` or your user cache dir
