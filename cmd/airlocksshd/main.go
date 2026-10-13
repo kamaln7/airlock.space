@@ -22,7 +22,7 @@ import (
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/colorprofile"
 	airlockspace "github.com/kamaln7/airlock.space"
-	"github.com/kamaln7/airlock.space/apod"
+	"github.com/kamaln7/airlock.space/internal/apod"
 )
 
 var (
@@ -31,10 +31,6 @@ var (
 )
 
 func main() {
-	if err := apod.NewClientFromEnv(); err != nil {
-		log.Fatal("could not load NASA API key", "error", err)
-	}
-
 	s, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(getenv("SSH_HOST_KEY_PATH", ".airlocksshd/id_ed25519")),

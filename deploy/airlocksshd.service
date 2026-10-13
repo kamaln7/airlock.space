@@ -9,8 +9,6 @@ DynamicUser=yes
 StateDirectory=airlocksshd
 WorkingDirectory=/var/lib/airlocksshd
 LoadCredential=ssh-host-key:/etc/airlocksshd/id_ed25519
-LoadCredential=nasa-api-key:/etc/airlocksshd/nasa-api-key
 Environment=SSH_HOST_KEY_PATH=%d/ssh-host-key
-Environment=NASA_API_KEY_PATH=%d/nasa-api-key
 Restart=always
 RestartSec=1s

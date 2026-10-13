@@ -19,14 +19,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
+	apodclient "github.com/kamaln7/airlock.space/pkg/apod"
 	"github.com/kamaln7/resolvable/v2"
-	"github.com/peteretelej/nasa"
 	"golang.org/x/sync/singleflight"
 )
 
 // live is the process-wide APOD fetcher the TUI calls through Today/ByDate.
-var live = &apod{}
+var live = &apod{client: apodclient.NewClient(
+	apodclient.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}),
+)}
 
 var Today = resolvable.New(
 	live.getAPOD,
@@ -36,11 +41,11 @@ var Today = resolvable.New(
 ).WithBackgroundContext()
 
 type APOD struct {
-	*nasa.Image
+	apodclient.Picture
+	Explanation string
 
-	// ImageBytes is the compressed source image (jpeg/png), or nil on the days
-	// NASA posts a video instead. That absence is a value, not an error, so it
-	// caches: an error would send every new session through the fetch again.
+	// ImageBytes is the compressed featured image, or nil when NASA provides
+	// none. Video entries may have a poster image. Absence is a cached value.
 	// Decode on demand and discard: a decoded APOD is tens of MB, the box has 512.
 	ImageBytes resolvable.V[[]byte]
 
@@ -81,15 +86,19 @@ func ByDate(t time.Time) (*APOD, error) {
 	}
 
 	v, err, _ := dateFlight.Do(key, func() (any, error) {
-		var img *nasa.Image
+		var entry *apodclient.Picture
 		if rec := loadDay(key); rec != nil {
-			img = rec.APOD // the day is on disk; no reason to ask NASA again
+			entry = rec.APOD
 		} else {
 			var err error
-			img, err = live.fetch(context.Background(), t)
+			entry, err = live.client.ByDate(context.Background(), t)
 			if err != nil {
 				return nil, err
 			}
+		}
+		a, err := newAPOD(entry)
+		if err != nil {
+			return nil, err
 		}
 
 		days.Lock()
@@ -97,7 +106,6 @@ func ByDate(t time.Time) (*APOD, error) {
 		if existing, ok := days.byDate[key]; ok {
 			return existing, nil
 		}
-		a := newAPOD(img)
 		days.byDate[key] = a
 		days.order = append(days.order, key)
 		for len(days.order) > daysInMemory {
@@ -113,71 +121,81 @@ func ByDate(t time.Time) (*APOD, error) {
 }
 
 type apod struct {
-	nasa *nasa.Client
-	last *APOD
+	client *apodclient.Client
+	last   *APOD
 }
 
 func (n *apod) getAPOD(ctx context.Context) (*APOD, error) {
-	var img *nasa.Image
+	var entry *apodclient.Picture
 	var err error
 	if d := os.Getenv("APOD_DATE"); d != "" { // e.g. APOD_DATE=2026-08-29, for testing
-		if n.last != nil && n.last.Date == d {
+		if n.last != nil && n.last.Date.Format(time.DateOnly) == d {
 			return n.last, nil
 		}
 		var t time.Time
 		if t, err = time.Parse(time.DateOnly, d); err != nil {
 			return nil, fmt.Errorf("invalid APOD_DATE: %w", err)
 		}
-		img, err = n.fetch(ctx, t)
+		entry, err = n.client.ByDate(ctx, t)
 	} else {
-		img, err = n.fetch(ctx, time.Time{})
+		entry, err = n.client.Latest(ctx)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if n.last == nil || n.last.Date != img.Date {
-		slog.Info("new APOD", "date", img.Date)
-		n.last = newAPOD(img)
+	if n.last == nil || !n.last.Date.Equal(entry.Date) {
+		a, err := newAPOD(entry)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("new APOD", "date", entry.Date.Format(time.DateOnly))
+		n.last = a
 	}
 	return n.last, nil
 }
 
-// api keys must never end up in logs
-var apiKeyRegexp = regexp.MustCompile(`api_key=[^&"'\s]+`)
-
-func redactAPIKey(err error) error {
-	return errors.New(apiKeyRegexp.ReplaceAllString(err.Error(), "api_key=REDACTED"))
+// dropExplanationLabel removes NASA's leading "Explanation:" label, with the
+// whitespace or break after it, from converted Markdown. The converter wraps
+// strong/em in symmetric "**", "*" or "***". When that emphasis also covers
+// body words, it stays and only the label goes. Anything else is returned as is.
+func dropExplanationLabel(md string) string {
+	s := strings.TrimLeftFunc(md, unicode.IsSpace)
+	var delim string
+	for _, d := range []string{"***", "**", "*"} {
+		if strings.HasPrefix(s, d) {
+			delim = d
+			s = s[len(d):]
+			break
+		}
+	}
+	s, ok := strings.CutPrefix(s, "Explanation:")
+	if !ok {
+		return md
+	}
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	if delim == "" {
+		return s
+	}
+	if s, ok := strings.CutPrefix(s, delim); ok {
+		return strings.TrimLeftFunc(s, unicode.IsSpace)
+	}
+	return delim + s
 }
 
-func newAPOD(img *nasa.Image) *APOD {
-	a := &APOD{Image: img}
+// newAPOD derives the Markdown explanation once, without its leading
+// "Explanation:" label; a conversion failure is an error, not a lossy
+// substitute. Picture.ExplanationHTML stays as published.
+func newAPOD(entry *apodclient.Picture) (*APOD, error) {
+	explanation, err := htmltomarkdown.ConvertString(entry.ExplanationHTML, converter.WithDomain(entry.ArticleURL))
+	if err != nil {
+		return nil, fmt.Errorf("converting explanation: %w", err)
+	}
+	a := &APOD{Picture: *entry, Explanation: dropExplanationLabel(explanation)}
 	a.ImageBytes = resolvable.New(a.getImageBytes,
 		resolvable.Retry(3, nil),
 		resolvable.CacheForever(),
 	).WithBackgroundContext()
-	return a
-}
-
-var youtubeIDRegexp = regexp.MustCompile(`(?:youtube\.com/(?:watch\?v=|embed/)|youtu\.be/)([\w-]{11})`)
-
-// imageURLs returns candidate URLs to try in order. The small APOD url is
-// first; HD is only a fallback if that fetch fails. Video days on youtube get
-// their thumbnail; directly-hosted videos (mp4) have no image and will fail.
-func (a *APOD) imageURLs() []string {
-	if m := youtubeIDRegexp.FindStringSubmatch(a.URL + " " + a.HDURL); m != nil {
-		return []string{
-			fmt.Sprintf("https://img.youtube.com/vi/%s/maxresdefault.jpg", m[1]),
-			fmt.Sprintf("https://img.youtube.com/vi/%s/hqdefault.jpg", m[1]),
-		}
-	}
-	var urls []string
-	if a.URL != "" {
-		urls = append(urls, a.URL)
-	}
-	if a.HDURL != "" {
-		urls = append(urls, a.HDURL)
-	}
-	return urls
+	return a, nil
 }
 
 // errNotAnImage means the URL served something that is not an image (an mp4 on
@@ -214,18 +232,16 @@ func imageCacheDir() string {
 var dateRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // dayVersion is the on-disk format. Bump it and every stored day is ignored.
-const dayVersion = 1
+const dayVersion = 2
 
-// day is one APOD as it sits on disk: our own bookkeeping wrapped around
-// NASA's response, kept whole and unedited. The image lives beside it as
-// <date>.img, and only exists when the day has one - the record is what says
-// whether it should, so a video day costs no fetch either.
+// day stores entry metadata and image bookkeeping. Version 2 invalidates
+// legacy API records, including days that cached NASA's logo as the image.
 type day struct {
-	Version   int         `json:"version"`
-	CachedAt  time.Time   `json:"cached_at"`
-	HasImage  bool        `json:"has_image"`
-	ImageSize image.Point `json:"image_size,omitzero"`
-	APOD      *nasa.Image `json:"apod"`
+	Version   int                 `json:"version"`
+	CachedAt  time.Time           `json:"cached_at"`
+	HasImage  bool                `json:"has_image"`
+	ImageSize image.Point         `json:"image_size,omitzero"`
+	APOD      *apodclient.Picture `json:"apod"`
 }
 
 // cacheFile names one of a day's files. The date is NASA's, so it is checked
@@ -249,7 +265,7 @@ func loadDay(date string) *day {
 		return nil
 	}
 	var d day
-	if err := json.Unmarshal(byt, &d); err != nil || d.Version != dayVersion || d.APOD == nil {
+	if err := json.Unmarshal(byt, &d); err != nil || d.Version != dayVersion || d.APOD == nil || d.APOD.Date.Format(time.DateOnly) != date {
 		return nil
 	}
 	return &d
@@ -259,11 +275,11 @@ func loadDay(date string) *day {
 // written first: the record is the index, so it must never promise a file
 // that is not there yet.
 func (a *APOD) store(body []byte) {
-	path := cacheFile(a.Date, "json")
+	path := cacheFile(a.Date.Format(time.DateOnly), "json")
 	if path == "" {
 		return
 	}
-	if len(body) > 0 && !writeFile(cacheFile(a.Date, "img"), body) {
+	if len(body) > 0 && !writeFile(cacheFile(a.Date.Format(time.DateOnly), "img"), body) {
 		return
 	}
 	rec, err := json.Marshal(day{
@@ -271,7 +287,7 @@ func (a *APOD) store(body []byte) {
 		CachedAt:  time.Now().UTC(),
 		HasImage:  len(body) > 0,
 		ImageSize: a.ImageSize,
-		APOD:      a.Image,
+		APOD:      &a.Picture,
 	})
 	if err != nil {
 		slog.Warn("could not encode cached day", "error", err)
@@ -297,50 +313,43 @@ func writeFile(path string, byt []byte) bool {
 }
 
 func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
-	if rec := loadDay(a.Date); rec != nil {
+	if rec := loadDay(a.Date.Format(time.DateOnly)); rec != nil {
 		if !rec.HasImage {
 			return nil, nil
 		}
-		if body, err := os.ReadFile(cacheFile(a.Date, "img")); err == nil && rec.ImageSize != (image.Point{}) {
+		if body, err := os.ReadFile(cacheFile(a.Date.Format(time.DateOnly), "img")); err == nil && rec.ImageSize != (image.Point{}) {
 			a.ImageSize = rec.ImageSize
 			return body, nil
 		}
 	}
 
-	urls := a.imageURLs()
-	if len(urls) == 0 {
+	if a.ImageURL == "" {
 		a.store(nil)
 		return nil, nil
 	}
 
-	var lastErr error
-	for _, url := range urls {
-		body, err := fetchImage(ctx, url)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
-		if err != nil {
-			lastErr = fmt.Errorf("decoding image config: %w", err)
-			continue
-		}
-		a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
-		a.store(body)
-		return body, nil
-	}
-	if errors.Is(lastErr, errNotAnImage) {
+	body, err := fetchImage(ctx, a.ImageURL)
+	if errors.Is(err, errNotAnImage) {
 		a.store(nil)
 		return nil, nil
 	}
-	return nil, lastErr
+	if err != nil {
+		return nil, err
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("decoding image config: %w", err)
+	}
+	a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
+	a.store(body)
+	return body, nil
 }
 
 // imageClient is isolated from http.DefaultClient so other packages cannot
 // change our pool.
 var imageClient = newImageClient()
 
-// ponytail: 32 in-flight JPEGs; drop this if apod.nasa.gov or the box complains.
+// ponytail: 32 in-flight images; reduce this if the image host or box complains.
 var imageSlots = make(chan struct{}, 32)
 
 func newImageClient() *http.Client {
@@ -383,11 +392,6 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("reading image body: %w", err)
 	}
 	return body, nil
-}
-
-// Link is the APOD page for this image on nasa.gov.
-func (a *APOD) Link() string {
-	return fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", a.ApodDate.Format("060102"))
 }
 
 // Decode decodes the compressed image. The result is intentionally not cached;

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -16,29 +15,104 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	glamouransi "charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/kamaln7/airlock.space/apod"
+	"github.com/kamaln7/airlock.space/internal/apod"
 	"github.com/samber/lo"
 )
 
-var paragraphBreaks = regexp.MustCompile(`\s{3,}`)
+// explanationStyle is the Glamour style the explanation is drawn in. It is
+// stated here, not detected: Glamour's own lookup reads the server's
+// environment, and the background that matters is the far end of the ssh
+// session's. Body text carries no color of its own, so it keeps the
+// terminal's foreground like the rest of the page, and the document has no
+// margin - the viewport is already exactly the width the layout allotted.
+// Colors are plain values: bubbletea converts them to the client's profile on
+// the way out.
+func (m *Model) explanationStyle() glamouransi.StyleConfig {
+	on := lo.ToPtr(true)
+	muted := hexColor(m.color(colorMuted))
+	return glamouransi.StyleConfig{
+		BlockQuote: glamouransi.StyleBlock{
+			StylePrimitive: glamouransi.StylePrimitive{Color: muted},
+			Indent:         lo.ToPtr(uint(1)),
+			IndentToken:    lo.ToPtr("│ "),
+		},
+		List:    glamouransi.StyleList{LevelIndent: 2},
+		Heading: glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{Bold: on, BlockSuffix: "\n"}},
 
-// NASA appends this migration notice to every explanation these days
-var apodMovingNotice = regexp.MustCompile(`\s*APOD.s main NASA (web\s?)?site is moving:.*`)
+		Emph:           glamouransi.StylePrimitive{Italic: on},
+		Strong:         glamouransi.StylePrimitive{Bold: on},
+		Strikethrough:  glamouransi.StylePrimitive{CrossedOut: on},
+		HorizontalRule: glamouransi.StylePrimitive{Color: muted, Format: "\n────────\n"},
 
-// explanationText is the displayed explanation: notice stripped, NASA's
-// space-run separators turned into real paragraph breaks. Memoized: it is
-// consulted per selected row on every drag event.
-func (m *Model) explanationText() string {
-	if m.explCacheFor != m.apod {
-		expl := apodMovingNotice.ReplaceAllString(m.apod.Explanation, "")
-		m.explCache = paragraphBreaks.ReplaceAllString(expl, "\n\n")
-		m.explCacheFor = m.apod
+		Item:        glamouransi.StylePrimitive{BlockPrefix: "• "},
+		Enumeration: glamouransi.StylePrimitive{BlockPrefix: ". "},
+
+		// a link is its label alone, however Glamour is asked to draw it
+		Link:     glamouransi.StylePrimitive{Color: hexColor(m.color(colorLink)), Underline: on},
+		LinkText: glamouransi.StylePrimitive{Color: hexColor(m.color(colorLink)), Underline: on},
 	}
-	return m.explCache
+}
+
+// hexColor is a color in the form Glamour's styles take.
+func hexColor(c color.Color) *string {
+	r, g, b, _ := c.RGBA()
+	return lo.ToPtr(fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8))
+}
+
+// renderMarkdown draws Markdown as lines at most width columns wide, minus the
+// blank ones Glamour leaves around the document. Links are their labels alone,
+// clickable with OSC 8, which a terminal without it ignores. Line breaks in
+// the text are kept as they are written. The renderer is built per call: it
+// keeps its block stack inside itself, so one is not safe to share between
+// sessions, and a render happens once per day and width - see syncViewport -
+// not once per frame.
+func renderMarkdown(md string, width int, style glamouransi.StyleConfig) ([]string, error) {
+	r, err := glamour.NewTermRenderer(glamour.WithStyles(style), glamour.WithWordWrap(width), glamour.WithPreservedNewLines(),
+		glamour.WithHyperlinkMode(glamouransi.HyperlinkModeInline))
+	if err != nil {
+		return nil, err
+	}
+	out, err := r.Render(md)
+	if err != nil {
+		return nil, err
+	}
+	blank := func(line string) bool { return strings.Trim(ansi.Strip(line), " ") == "" }
+	lines := strings.Split(out, "\n")
+	for len(lines) > 0 && blank(lines[len(lines)-1]) {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && blank(lines[0]) {
+		lines = lines[1:]
+	}
+	return lines, nil
+}
+
+// explanationLines is the day's explanation as drawn at width columns, and
+// leaves its rows as plain text in explRows for the selection to check
+// against. A render that fails is logged and said so on screen: showing
+// nothing, or the Markdown raw, would pass for the explanation.
+func (m *Model) explanationLines(width int) []string {
+	m.explRows = nil
+	if m.apod == nil {
+		return nil
+	}
+	lines, err := renderMarkdown(m.apod.Explanation, width, m.explanationStyle())
+	if err != nil {
+		slog.Error("failed to render explanation", "error", err, "date", m.apod.Date)
+		lines = strings.Split(m.txtYellow().Width(width).Render("couldn't render the explanation: "+err.Error()), "\n")
+	}
+	for _, line := range lines {
+		if row := strings.Trim(ansi.Strip(line), " "); row != "" {
+			m.explRows = append(m.explRows, row)
+		}
+	}
+	return lines
 }
 
 // txt is the base style. v2 has no per-session renderer: the program converts
@@ -57,6 +131,7 @@ var (
 	colorNebula     = adaptive{lipgloss.Color("#B4A7D6"), lipgloss.Color("#6B4E8C")} // Purple nebula tones
 	colorCosmic     = adaptive{lipgloss.Color("#A7D6D6"), lipgloss.Color("#4E8C8C")} // Deep space teal
 	colorStellar    = adaptive{lipgloss.Color("#D6B4A7"), lipgloss.Color("#8C6B4E")} // Warm star glow
+	colorLink       = adaptive{lipgloss.Color("#2F7F7F"), lipgloss.Color("#7FD1D1")} // Teal that stays readable as text, unlike the decorative tones
 	colorYellow     = lipgloss.Color("220")
 )
 
@@ -106,15 +181,15 @@ type Model struct {
 	selPending     bool // left button went down inside the selectable region
 	explCol        int  // where the explanation block landed, for selection
 	explWidth      int
-	explCache      string // memoized processed explanation
-	explCacheFor   *apod.APOD
+	explRows       []string       // the explanation as drawn, one plain-text row per line, for selection
 	vp             viewport.Model // the scrolling explanation
 	vpFor          *apod.APOD     // the day its content was set from
-	vpWidth        int
-	trueW, trueH   int    // the size the terminal last reported
-	resizing       bool   // the window is still being dragged
-	lastArt        string // the art last drawn, to show while it is
-	clipKey        string // that art cut to a box, memoized across frames
+	vpWidth        int            // the width that content was drawn at
+	vpLight        bool           // and the background it was styled for
+	trueW, trueH   int            // the size the terminal last reported
+	resizing       bool           // the window is still being dragged
+	lastArt        string         // the art last drawn, to show while it is
+	clipKey        string         // that art cut to a box, memoized across frames
 	clipped        string
 	sentW, sentH   int       // the pixel box the photo on screen was encoded for
 	resizeGen      int       // which resize the pending settle belongs to
@@ -324,15 +399,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.apod == nil {
 			if m.apod != nil {
-				m.date = m.apod.ApodDate // stay on the day we are already showing
+				m.date = m.apod.Date // stay on the day we are already showing
 			}
 			m.State = StateAPOD
 			break
 		}
 		m.apod = msg.apod
-		m.date = msg.apod.ApodDate
-		if msg.apod.ApodDate.After(m.latest) {
-			m.latest = msg.apod.ApodDate // NASA posted a new one under us
+		m.date = msg.apod.Date
+		if msg.apod.Date.After(m.latest) {
+			m.latest = msg.apod.Date // NASA posted a new one under us
 		}
 		m.imageOK = false
 		m.kittyReady = false
@@ -799,7 +874,7 @@ func (m *Model) viewLinkLine() string {
 	if m.apod == nil {
 		return "" // first fetch failed: the page already says so
 	}
-	link := m.apod.Link()
+	link := m.apod.ArticleURL
 	st := m.txtMuted()
 	if m.hoverLink {
 		st = m.txtYellow().Underline(true)
@@ -818,7 +893,7 @@ func (m *Model) copyLink() tea.Cmd {
 	}
 	m.copiedRecently = true
 	return tea.Batch(
-		tea.SetClipboard(m.apod.Link()),
+		tea.SetClipboard(m.apod.ArticleURL),
 		tea.Tick(2*time.Second, func(time.Time) tea.Msg { return msgCopyExpired{} }),
 	)
 }
@@ -926,8 +1001,9 @@ func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 		return s, e, true
 	}
 
-	// explanation rows, matched against the actual text so the picture beside
-	// them, the gaps and the scrollbar never highlight
+	// explanation rows, matched against the rendered text - what is on
+	// screen, not the Markdown behind it - so the picture beside them, the
+	// gaps, the link line and the scrollbar never highlight
 	if m.State == StateAPOD && m.explWidth > 0 {
 		colStart := m.explCol
 		colEnd := min(m.explCol+m.explWidth, ansi.StringWidth(line))
@@ -940,7 +1016,7 @@ func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 		if trimmed == "" {
 			return 0, 0, false
 		}
-		if !strings.Contains(m.explanationText(), trimmed) && !strings.Contains(m.apod.Title, trimmed) {
+		if !slices.Contains(m.explRows, trimmed) && !strings.Contains(m.apod.Title, trimmed) {
 			return 0, 0, false
 		}
 		x1 = colStart + ansi.StringWidth(seg) - ansi.StringWidth(trimmedLeft)
@@ -1081,7 +1157,7 @@ func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
 		helpKey = m.navHit(line, x)
 	}
 	if m.apod != nil {
-		start, end, ok := columnSpan(line, m.apod.Link())
+		start, end, ok := columnSpan(line, m.apod.ArticleURL)
 		link = ok && x >= start && x < end
 	}
 	return helpKey, link
@@ -1109,17 +1185,20 @@ func explKeyMap() viewport.KeyMap {
 	}
 }
 
-// syncViewport points the viewport at the day on screen, re-wrapping only when
-// the day or the width it is wrapped to changes. Its height follows the
-// content up to maxHeight, so a short explanation stays a short block.
+// syncViewport points the viewport at the day on screen, rendering the
+// explanation again only when the day, the width it is drawn at or the
+// background it is styled for changes. Its
+// height follows the content up to maxHeight, so a short explanation stays a
+// short block.
 func (m *Model) syncViewport(width, maxHeight int) {
-	if m.vpFor != m.apod || m.vpWidth != width {
-		// wrapped here rather than by the viewport: SoftWrap breaks mid-word
+	if m.vpFor != m.apod || m.vpWidth != width || m.vpLight != m.isLight {
+		// Glamour wraps the text, so the viewport must not: its SoftWrap
+		// would break a second time, mid-word
 		m.vp.KeyMap = explKeyMap()
 		m.vp.SetWidth(width)
-		m.vp.SetContent(lipgloss.Wrap(m.explanationText(), width, ""))
+		m.vp.SetContentLines(m.explanationLines(width))
 		m.vp.SetYOffset(0) // a new day starts at its beginning
-		m.vpFor, m.vpWidth = m.apod, width
+		m.vpFor, m.vpWidth, m.vpLight = m.apod, width, m.isLight
 	}
 	m.vp.SetHeight(max(1, min(m.vp.TotalLineCount(), maxHeight)))
 }
@@ -1312,8 +1391,8 @@ func Goodbye(width int, client string, a *apod.APOD) string {
 	return fmt.Sprintf("\n%s\n 🌌 %s %s\n 🔗 %s\n\n%s",
 		art,
 		txt.Bold(true).Render(a.Title),
-		muted.Render("— "+a.ApodDate.Format(time.DateOnly)),
-		yellow.Render(a.Link()),
+		muted.Render("— "+a.Date.Format(time.DateOnly)),
+		yellow.Render(a.ArticleURL),
 		msg)
 }
 
@@ -1417,7 +1496,7 @@ func (m *Model) imageArea(cols, rows int) string {
 	// until the dragging stops - the page itself reflows at once, it is only
 	// the picture that waits.
 	if m.resizing {
-		if s, ok := sextantCached(m.apod.Date, c, r, canvasMode(m.Profile)); ok {
+		if s, ok := sextantCached(m.apod.Date.Format(time.DateOnly), c, r, canvasMode(m.Profile)); ok {
 			return strings.TrimSuffix(s, "\n")
 		}
 		// memoized: a frame goes out for every mouse twitch as well as every
@@ -1429,7 +1508,7 @@ func (m *Model) imageArea(cols, rows int) string {
 		return m.clipped
 	}
 
-	s, err := cachedSextant(m.apod.Date, m.apod.Decode, c, r, canvasMode(m.Profile))
+	s, err := cachedSextant(m.apod.Date.Format(time.DateOnly), m.apod.Decode, c, r, canvasMode(m.Profile))
 	if err != nil {
 		slog.Warn("failed to render image", "error", err)
 		return m.txtMuted().Render("image unavailable :(")
@@ -1484,7 +1563,7 @@ func (m *Model) dayArrows() (prev, next string) {
 // The caller centers whatever comes back.
 func (m *Model) viewNav(width int) string {
 	prev, next := m.dayArrows()
-	center := m.txtMuted().Render(m.apod.ApodDate.Format("Jan 2, 2006"))
+	center := m.txtMuted().Render(m.apod.Date.Format("Jan 2, 2006"))
 
 	inner := min(navMaxWidth, width)
 	pw, cw, nw := lipgloss.Width(prev), lipgloss.Width(center), lipgloss.Width(next)
@@ -1524,7 +1603,7 @@ func (m *Model) viewAPODText(width int) string {
 	}
 	// calendar over title, both centered, on rows of their own: with a date on
 	// each arrow the day line is too wide to share one with anything else
-	title := hyperlink(m.apod.Link(), txt.Bold(true).Render(m.apod.Title))
+	title := hyperlink(m.apod.ArticleURL, txt.Bold(true).Render(m.apod.Title))
 	return txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width)+"\n"+title) + "\n\n"
 }
 

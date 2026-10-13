@@ -45,16 +45,6 @@ in
         credential so DynamicUser does not need access to the secret file.
       '';
     };
-
-    nasaKeyFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "/run/secrets/airlock-nasa-api-key";
-      description = ''
-        Path to a NASA API key. Passed as a systemd credential; the service
-        sees it as NASA_API_KEY_PATH.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -89,12 +79,8 @@ in
         DynamicUser = true;
         StateDirectory = "airlock";
         WorkingDirectory = "/var/lib/airlock";
-        LoadCredential =
-          [ "ssh-host-key:${cfg.hostKeyFile}" ]
-          ++ lib.optional (cfg.nasaKeyFile != null) "nasa-api-key:${cfg.nasaKeyFile}";
-        Environment =
-          [ "SSH_HOST_KEY_PATH=%d/ssh-host-key" ]
-          ++ lib.optional (cfg.nasaKeyFile != null) "NASA_API_KEY_PATH=%d/nasa-api-key";
+        LoadCredential = "ssh-host-key:${cfg.hostKeyFile}";
+        Environment = "SSH_HOST_KEY_PATH=%d/ssh-host-key";
         Restart = "always";
         RestartSec = "1s";
       };

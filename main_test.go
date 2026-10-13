@@ -18,8 +18,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
-	"github.com/kamaln7/airlock.space/apod"
-	"github.com/peteretelej/nasa"
+	"github.com/kamaln7/airlock.space/internal/apod"
+	apodclient "github.com/kamaln7/airlock.space/pkg/apod"
 )
 
 func TestFitImage(t *testing.T) {
@@ -41,7 +41,7 @@ func TestFitImage(t *testing.T) {
 
 // a video day has no picture, so nothing may offer to enlarge one
 func TestVideoDayOffersNoImageKeys(t *testing.T) {
-	m := &Model{Width: 100, Height: 40, apod: &apod.APOD{Image: &nasa.Image{}}}
+	m := &Model{Width: 100, Height: 40, apod: &apod.APOD{}}
 	m.Init()
 	m.Update(imageMsg{ok: false})
 
@@ -122,15 +122,16 @@ func TestFrameLineFollowsTheVisibleRows(t *testing.T) {
 // string, not the other way round. Only reproduces at a real color profile.
 func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
 	m := &Model{Width: 100, Height: 40, hoverLink: true,
-		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
-			Explanation: "some words about space.",
-			ApodDate:    time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)}}}
+		apod: &apod.APOD{Picture: apodclient.Picture{Title: "A Test Nebula",
+			ArticleURL: "https://science.nasa.gov/image-article/test-nebula/",
+			Date:       time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)},
+			Explanation: "some words about space."}}
 	m.State = StateAPOD
 
-	link := m.apod.Link()
+	link := m.apod.ArticleURL
 	for y, raw := range strings.Split(m.baseView(), "\n") {
 		line := ansi.Strip(raw)
-		if !strings.Contains(line, "apod.nasa.gov") {
+		if !strings.Contains(line, "science.nasa.gov") {
 			continue
 		}
 		// the escape must be gone once stripped, leaving only the visible URL
@@ -157,8 +158,10 @@ func testModel(t *testing.T, date time.Time) *Model {
 	t.Helper()
 	m := &Model{Width: 100, Height: 40,
 		date: date, latest: day(2026, 8, 31),
-		apod: &apod.APOD{Image: &nasa.Image{Title: "A Test Nebula",
-			Explanation: "some words about space.", ApodDate: date}}}
+		apod: &apod.APOD{Picture: apodclient.Picture{Title: "A Test Nebula",
+			ArticleURL: "https://science.nasa.gov/image-article/test-nebula/",
+			Date:       date},
+			Explanation: "some words about space."}}
 	m.State = StateAPOD
 	return m
 }
@@ -445,12 +448,378 @@ func explSelectable(t *testing.T, m *Model) {
 				x1, x2, m.explCol, m.explWidth+m.explCol)
 		}
 		text := strings.TrimSpace(ansi.Cut(stripped, x1, x2))
-		if !strings.Contains(m.explanationText(), text) {
+		if !slices.Contains(m.explRows, text) {
 			t.Errorf("selected %q, which is not explanation text", text)
 		}
 	}
 	if found == 0 {
 		t.Error("no explanation row is selectable beside the picture")
+	}
+}
+
+// the explanation is Markdown now, drawn by Glamour: the syntax is gone from
+// the screen, what it stood for is there instead, and the paragraphs are apart
+const (
+	mdParagraph = "Some **bold** and *slanted* words about deep space, with a " +
+		"[link label](https://example.com/page) in the middle of a long paragraph " +
+		"that has to wrap on a narrow screen."
+	// what the screen shows of mdParagraph: a link is its label alone
+	plainParagraph = "Some bold and slanted words about deep space, with a " +
+		"link label in the middle of a long paragraph " +
+		"that has to wrap on a narrow screen."
+)
+
+// markdownDay is a day whose explanation runs to n paragraphs, and the words
+// the screen should show for it
+func markdownDay(t *testing.T, n int) (m *Model, words []string) {
+	t.Helper()
+	m = testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = strings.TrimSuffix(strings.Repeat(mdParagraph+"\n\n", n), "\n\n")
+	return m, strings.Fields(strings.TrimSuffix(strings.Repeat(plainParagraph+"\n\n", n), "\n\n"))
+}
+
+func TestExplanationRendersMarkdown(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = "Some **bold** and *slanted* words.\n\n" +
+		"A second paragraph, with a [link label](https://example.com/page)."
+	raw := m.baseView()
+	frame := ansi.Strip(raw)
+
+	for _, syntax := range []string{"**", "*slanted*", "](", "[link"} {
+		if strings.Contains(frame, syntax) {
+			t.Errorf("Markdown syntax %q is on screen:\n%s", syntax, frame)
+		}
+	}
+	rows := strings.Split(frame, "\n")
+	first := slices.IndexFunc(rows, func(r string) bool { return strings.Contains(r, "Some bold and slanted words.") })
+	second := slices.IndexFunc(rows, func(r string) bool {
+		return strings.Contains(r, "A second paragraph, with a link label.")
+	})
+	if first < 0 || second < 0 {
+		t.Fatalf("rendered paragraphs not found (rows %d, %d):\n%s", first, second, frame)
+	}
+	if second-first != 2 {
+		t.Errorf("paragraphs are %d rows apart; want one blank row between them", second-first)
+	}
+
+	// styled, not merely stripped of its syntax
+	if !strings.Contains(raw, "\x1b[1mbold") {
+		t.Error("strong text is not bold")
+	}
+	if !strings.Contains(raw, "\x1b[3mslanted") {
+		t.Error("emphasized text is not italic")
+	}
+}
+
+// cellsOf lays styled text out the way a terminal does, a row of cells per
+// line. Links and underlines are checked on these, by what the reader gets,
+// not by how the escapes that made it so happen to be spelled.
+func cellsOf(s string) []uv.Line {
+	return uv.NewStyledString(s).Lines(ansi.GraphemeWidth)
+}
+
+// clickable is the text under each hyperlink target in rows, spaces left out
+// so that a label which wraps compares equal to one which does not.
+func clickable(rows []uv.Line) map[string]string {
+	out := map[string]string{}
+	for _, row := range rows {
+		for _, c := range row {
+			if c.Link.URL != "" && c.Content != " " {
+				out[c.Link.URL] += c.Content
+			}
+		}
+	}
+	return out
+}
+
+// underlined is the text drawn underlined in rows, spaces left out.
+func underlined(rows []uv.Line) string {
+	var b strings.Builder
+	for _, row := range rows {
+		for _, c := range row {
+			if c.Style.Underline != uv.UnderlineNone && c.Content != " " {
+				b.WriteString(c.Content)
+			}
+		}
+	}
+	return b.String()
+}
+
+// a link is its label alone: the address is not printed after it, and the
+// label is what is clickable and underlined
+func TestExplanationLinksAreLabels(t *testing.T) {
+	const md = "Seen in [Hubble](https://example.com/hubble), a " +
+		"[*slanted* and **bold** label](https://example.com/nested) and " +
+		"[ours](https://example.com/ours)."
+	words := strings.Fields("Seen in Hubble, a slanted and bold label and ours.")
+	targets := map[string]string{
+		"https://example.com/hubble": "Hubble",
+		"https://example.com/nested": "slantedandboldlabel",
+		"https://example.com/ours":   "ours",
+	}
+
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = md
+	frame := ansi.Strip(m.baseView())
+
+	if strings.Contains(frame, "example.com") {
+		t.Errorf("a link address is on screen:\n%s", frame)
+	}
+	if got := strings.Fields(strings.Join(m.explRows, " ")); !slices.Equal(got, words) {
+		t.Errorf("the explanation reads %q; want the labels in the text, %q", got, words)
+	}
+
+	cells := cellsOf(m.vp.GetContent())
+	if got := clickable(cells); !maps.Equal(got, targets) {
+		t.Errorf("clickable text = %v; want %v", got, targets)
+	}
+	if got, want := underlined(cells), "Hubbleslantedandboldlabelours"; got != want {
+		t.Errorf("underlined text = %q; want the labels, %q", got, want)
+	}
+}
+
+// the explanation's own line breaks are kept - a soft break, both kinds of
+// hard one, and the blank row between paragraphs - not run together
+func TestExplanationKeepsLineBreaks(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = "soft\nbreak\n\nhard  \nbreak\n\nbackslash\\\nbreak"
+	m.baseView()
+
+	var got []string
+	for _, row := range strings.Split(ansi.Strip(m.vp.GetContent()), "\n") {
+		got = append(got, strings.TrimRight(row, " "))
+	}
+	want := []string{"soft", "break", "", "hard", "break", "", "backslash", "break"}
+	if !slices.Equal(got, want) {
+		t.Errorf("rows = %q; want %q", got, want)
+	}
+}
+
+// a label that wraps is clickable on every row it covers, and no row runs past
+// the box it is drawn in
+func TestWrappedLabelStaysClickable(t *testing.T) {
+	const label = "a label long enough that it has to wrap over several rows of this narrow screen"
+	m := testModel(t, day(2026, 8, 20))
+	m.Width = 60
+	m.apod.Explanation = "Look at [" + label + "](https://example.com/long) today."
+	m.baseView()
+	content := m.vp.GetContent()
+
+	for _, row := range strings.Split(content, "\n") {
+		if got := ansi.StringWidth(row); got > m.vp.Width() {
+			t.Errorf("a row is %d columns in a %d-column box", got, m.vp.Width())
+		}
+	}
+	rows := cellsOf(content)
+	var linked int
+	for _, row := range rows {
+		if len(clickable([]uv.Line{row})) > 0 {
+			linked++
+		}
+	}
+	if linked < 2 {
+		t.Errorf("the label is clickable on %d rows; it wraps over more than one", linked)
+	}
+	if got, want := clickable(rows)["https://example.com/long"], strings.ReplaceAll(label, " ", ""); got != want {
+		t.Errorf("clickable text = %q; want the whole label, %q", got, want)
+	}
+}
+
+// the title and the article's address are the page's own links, not the
+// explanation's
+func TestArticleLinksAreClickable(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	got := clickable(cellsOf(m.baseView()))[m.apod.ArticleURL]
+	for _, want := range []string{"ATestNebula", m.apod.ArticleURL} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the text under the article link is %q; it lacks %q", got, want)
+		}
+	}
+}
+
+// an address the text writes out - bare, in <angle brackets>, or as its own
+// label - is the link's only text and stays on screen, whole and without the
+// punctuation after it; a labeled link beside them still shows its label
+// alone, even when it points where a bare address does
+func TestExplanationBareAddressesStayVisible(t *testing.T) {
+	const md = "See https://example.com/a. Also <https://example.com/b>, " +
+		"[https://example.com/c](https://example.com/c), [the *label*](https://example.com/d) " +
+		"and [same](https://example.com/a)."
+	words := strings.Fields("See https://example.com/a. Also https://example.com/b, https://example.com/c, the label and same.")
+	targets := map[string]string{
+		"https://example.com/a": "https://example.com/asame",
+		"https://example.com/b": "https://example.com/b",
+		"https://example.com/c": "https://example.com/c",
+		"https://example.com/d": "thelabel",
+	}
+
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = md
+	m.baseView()
+
+	if got := strings.Fields(strings.Join(m.explRows, " ")); !slices.Equal(got, words) {
+		t.Errorf("the explanation reads %q; want %q", got, words)
+	}
+	if got := clickable(cellsOf(m.vp.GetContent())); !maps.Equal(got, targets) {
+		t.Errorf("clickable text = %v; want %v", got, targets)
+	}
+}
+
+// what is dragged over is what is on screen, not the Markdown behind it: the
+// copy is the rendered rows, blank row between paragraphs and all, a link is
+// copied as its label, and the link line, the calendar and the help bar stay
+// out of it
+func TestSelectionCopiesRenderedText(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	m.apod.Explanation = "Some **bold** and *slanted* words.\n\n" +
+		"A second paragraph, with a [link label](https://example.com/page)."
+	rows := strings.Split(m.baseView(), "\n")
+	at := func(needle string) (row int, line string) {
+		t.Helper()
+		row = slices.IndexFunc(rows, func(r string) bool { return strings.Contains(ansi.Strip(r), needle) })
+		if row < 0 {
+			t.Fatalf("no row with %q", needle)
+		}
+		return row, ansi.Strip(rows[row])
+	}
+
+	top, topLine := at("Some bold and slanted words.")
+	bottom, bottomLine := at("link label.")
+	x1, _, ok := m.copyableSpan(topLine)
+	if !ok {
+		t.Fatal("the first explanation row is not selectable")
+	}
+	_, x2, ok := m.copyableSpan(bottomLine)
+	if !ok {
+		t.Fatal("the last explanation row is not selectable")
+	}
+
+	m.selAnchor, m.selEnd, m.selActive = point{x1, top}, point{x2 - 1, bottom}, true
+	want := "Some bold and slanted words.\n\nA second paragraph, with a link label."
+	if got := m.selectionText(); got != want {
+		t.Errorf("selectionText() = %q; want %q", got, want)
+	}
+
+	for _, furniture := range []string{m.apod.ArticleURL, "copy link", "Aug 20, 2026"} {
+		_, line := at(furniture)
+		if x1, x2, ok := m.copyableSpan(line); ok && strings.Contains(ansi.Cut(line, x1, x2), furniture) {
+			t.Errorf("%q is selectable; only the title and the explanation are", furniture)
+		}
+	}
+}
+
+// scrolling carries the labels, and what makes them clickable, along with the
+// text, and dragging over one copies the label alone
+func TestLinkLabelsScrollAndCopy(t *testing.T) {
+	const url = "https://example.com/page"
+	m, _ := markdownDay(t, 8)
+	m.Width, m.Height = 150, 24
+	m.baseView()
+	for range 6 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.vp.YOffset() == 0 {
+		t.Fatal("fixture does not scroll")
+	}
+
+	got := clickable(cellsOf(m.vp.View()))[url]
+	if got == "" || strings.ReplaceAll(got, "linklabel", "") != "" {
+		t.Errorf("clickable text in view = %q; want the label, link label, alone", got)
+	}
+
+	rows := strings.Split(m.baseView(), "\n")
+	y := slices.IndexFunc(rows, func(r string) bool { return strings.Contains(ansi.Strip(r), "link label") })
+	if y < 0 {
+		t.Fatal("no row with a label in view")
+	}
+	x1, x2, ok := m.copyableSpan(ansi.Strip(rows[y]))
+	if !ok {
+		t.Fatal("the row with a label is not selectable")
+	}
+	m.selAnchor, m.selEnd, m.selActive = point{x1, y}, point{x2 - 1, y}, true
+	copied := m.selectionText()
+	if !strings.Contains(copied, "link label") || strings.Contains(copied, "example.com") || !slices.Contains(m.explRows, copied) {
+		t.Errorf("copied %q; want one row of the explanation, with the label and no address", copied)
+	}
+}
+
+// the explanation has to draw, wrap and stay selectable at whatever width the
+// terminal has, with the same words on screen at every one of them
+func TestMarkdownLayoutFits(t *testing.T) {
+	for _, w := range []int{60, 80, 100, 150, 200} {
+		for _, h := range []int{20, 24, 40} {
+			t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+				m, words := markdownDay(t, 6)
+				m.Width, m.Height = w, h
+				lines := strings.Split(m.baseView(), "\n")
+
+				if len(lines) > h {
+					t.Errorf("frame is %d rows", len(lines))
+				}
+				for i, l := range lines {
+					if got := ansi.StringWidth(l); got > w {
+						t.Errorf("row %d is %d columns wide", i, got)
+					}
+				}
+				for _, l := range strings.Split(m.vp.GetContent(), "\n") {
+					if got := ansi.StringWidth(l); got > m.vp.Width() {
+						t.Errorf("a rendered row is %d columns in a %d-column box", got, m.vp.Width())
+					}
+				}
+				if got := strings.Fields(strings.Join(m.explRows, " ")); !slices.Equal(got, words) {
+					t.Errorf("rendered words differ from the explanation's:\n got %q\nwant %q", got, words)
+				}
+
+				// every row of text on screen is selectable, exactly where it is
+				var visible, selectable int
+				for _, l := range strings.Split(m.vp.View(), "\n") {
+					if strings.TrimSpace(ansi.Strip(l)) != "" {
+						visible++
+					}
+				}
+				for _, l := range lines {
+					stripped := ansi.Strip(l)
+					x1, x2, ok := m.copyableSpan(stripped)
+					if !ok || strings.Contains(stripped, m.apod.Title) {
+						continue
+					}
+					selectable++
+					if x1 < m.explCol || x2 > m.explCol+m.explWidth {
+						t.Errorf("span %d-%d strays outside the explanation columns %d-%d",
+							x1, x2, m.explCol, m.explCol+m.explWidth)
+					}
+				}
+				if selectable != visible {
+					t.Errorf("%d rows of explanation on screen, %d selectable", visible, selectable)
+				}
+			})
+		}
+	}
+}
+
+// a window resize draws the explanation again at the new width, from the top,
+// without losing a word
+func TestResizeRedrawsTheExplanation(t *testing.T) {
+	m, words := markdownDay(t, 8)
+	m.Width, m.Height = 150, 24
+	m.baseView()
+	wide, wideRows := m.vpWidth, m.vp.TotalLineCount()
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.vp.YOffset() == 0 {
+		t.Fatal("fixture does not scroll")
+	}
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 24}) // shrinking applies at once
+	m.baseView()
+
+	if m.vpWidth >= wide || m.vp.TotalLineCount() <= wideRows {
+		t.Errorf("width %d, %d rows after shrinking; was %d, %d", m.vpWidth, m.vp.TotalLineCount(), wide, wideRows)
+	}
+	if m.vp.YOffset() != 0 {
+		t.Errorf("offset = %d after a reflow; the new width starts at the top", m.vp.YOffset())
+	}
+	if got := strings.Fields(strings.Join(m.explRows, " ")); !slices.Equal(got, words) {
+		t.Error("words were lost in the reflow")
 	}
 }
 
@@ -508,18 +877,19 @@ func TestGoodbyeCarriesArt(t *testing.T) {
 	if rows == 0 {
 		t.Errorf("no art rows in the goodbye:\n%s", out)
 	}
-	if strings.Contains(out, "apod.nasa.gov") || strings.Contains(out, "🌌") {
+	if strings.Contains(out, "science.nasa.gov") || strings.Contains(out, "🌌") {
 		t.Errorf("nil APOD should not print title/link:\n%s", out)
 	}
 }
 
 func TestGoodbyeShowsTheDayYouWereOn(t *testing.T) {
-	a := &apod.APOD{Image: &nasa.Image{
-		Title:    "A Test Nebula",
-		ApodDate: day(2026, 8, 30),
+	a := &apod.APOD{Picture: apodclient.Picture{
+		Title:      "A Test Nebula",
+		ArticleURL: "https://science.nasa.gov/image-article/test-nebula/",
+		Date:       day(2026, 8, 30),
 	}}
 	out := ansi.Strip(Goodbye(100, "day", a))
-	for _, want := range []string{"A Test Nebula", "2026-08-30", "apod.nasa.gov"} {
+	for _, want := range []string{"A Test Nebula", "2026-08-30", "science.nasa.gov"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("goodbye missing %q:\n%s", want, out)
 		}
@@ -574,7 +944,7 @@ func TestVideoDayKeepsThePageShape(t *testing.T) {
 	video.imageOK, video.kittyReady = false, false
 	video.apod.ImageSize = image.Point{}
 
-	for _, needle := range []string{"Some words", "apod.nasa.gov", "q quit"} {
+	for _, needle := range []string{"Some words", "science.nasa.gov", "q quit"} {
 		a, b := rowOf(photo, needle), rowOf(video, needle)
 		if a < 0 || a != b {
 			t.Errorf("%q is on row %d with a picture and row %d without", needle, a, b)
@@ -1104,8 +1474,8 @@ func TestNewDayGoesBackToArt(t *testing.T) {
 		t.Fatal("p did not record that the reader chose")
 	}
 
-	next := &apod.APOD{Image: &nasa.Image{Title: "Another Day",
-		Explanation: "more words", ApodDate: day(2026, 8, 19)}}
+	next := &apod.APOD{Picture: apodclient.Picture{Title: "Another Day", Date: day(2026, 8, 19)},
+		Explanation: "more words"}
 	next.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
 	m.date = day(2026, 8, 19)
 	m.Update(apodMsg{date: day(2026, 8, 19), apod: next})
@@ -1122,13 +1492,13 @@ func TestNewDayGoesBackToArt(t *testing.T) {
 func TestStaleDayResponseIsDropped(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))
 	press(m, tea.KeyLeft) // now waiting on the 30th
-	overtaken := &apod.APOD{Image: &nasa.Image{Title: "Overtaken", ApodDate: day(2026, 8, 25)}}
+	overtaken := &apod.APOD{Picture: apodclient.Picture{Title: "Overtaken", Date: day(2026, 8, 25)}}
 	m.Update(apodMsg{date: day(2026, 8, 25), apod: overtaken})
 	if m.apod.Title == "Overtaken" {
 		t.Error("a response for a day we left applied anyway")
 	}
 
-	wanted := &apod.APOD{Image: &nasa.Image{Title: "Wanted", ApodDate: day(2026, 8, 30)}}
+	wanted := &apod.APOD{Picture: apodclient.Picture{Title: "Wanted", Date: day(2026, 8, 30)}}
 	m.Update(apodMsg{date: day(2026, 8, 30), apod: wanted})
 	if m.apod.Title != "Wanted" || m.State != StateAPOD {
 		t.Errorf("apod = %q, state = %v; want the day we asked for", m.apod.Title, m.State)
