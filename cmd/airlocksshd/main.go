@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -75,6 +77,28 @@ func main() {
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+	var profiler *http.Server
+	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatal("could not bind pprof listener", "error", err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+		mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+		profiler = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		defer profiler.Close()
+		go func() {
+			if err := profiler.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatal("could not serve pprof", "error", err)
+			}
+		}()
+		log.Info("starting pprof server", "address", listener.Addr())
+	}
 	go func() {
 		var err error
 		if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
@@ -102,6 +126,11 @@ func main() {
 	defer func() { cancel() }()
 	if err := s.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Error("could not stop server", "error", err)
+	}
+	if profiler != nil {
+		if err := profiler.Shutdown(ctx); err != nil {
+			log.Error("could not stop pprof server", "error", err)
+		}
 	}
 }
 

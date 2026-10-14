@@ -77,3 +77,17 @@ Run `airlocksshd` however you like. It:
 * falls back to binding to `SSH_HOST`:`SSH_PORT` itself (`localhost:23234`)
 * keeps its host key at `SSH_HOST_KEY_PATH` (`.airlocksshd/id_ed25519`, generated on first start)
 * caches source images under `STATE_DIRECTORY` or your user cache dir
+
+### Profiling
+
+Set `PPROF_ADDR` to enable the Go profiling endpoint.
+
+```sh
+PPROF_ADDR=127.0.0.1:6060 go run ./cmd/airlocksshd
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+```
+
+Only one CPU profile can run at a time. Pause a continuous collector before
+taking an on-demand CPU profile. Heap, allocation and goroutine snapshots do
+not need that pause. Block and mutex sampling remain disabled.
