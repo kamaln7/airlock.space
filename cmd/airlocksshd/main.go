@@ -91,6 +91,9 @@ func main() {
 		mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 		profiler = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		// Closed on return, not drained with Shutdown: that would wait out a CPU
+		// profile in flight (its whole ?seconds= window) before the stop ends,
+		// for a profile the next scrape takes again.
 		defer profiler.Close()
 		go func() {
 			if err := profiler.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -126,11 +129,6 @@ func main() {
 	defer func() { cancel() }()
 	if err := s.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Error("could not stop server", "error", err)
-	}
-	if profiler != nil {
-		if err := profiler.Shutdown(ctx); err != nil {
-			log.Error("could not stop pprof server", "error", err)
-		}
 	}
 }
 
