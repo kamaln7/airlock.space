@@ -3,65 +3,251 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ssh airlock.space</title>
+    <title>airlock.space</title>
+    <link rel="icon" href="favicon.png" type="image/png">
+    <link rel="preload" href="src/fonts/DepartureMono-Regular.otf" as="font" type="font/otf" crossorigin>
+    <link rel="stylesheet" href="src/fonts.css">
     <style>
+        :root {
+            --terminal-background: #111311;
+            --terminal-foreground: #e7e0cf;
+            --terminal-brightYellow: #ffd700;
+            --terminal-fontSize: 16.5px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* Keep one pixel-art arrow, including over terminal links and text. */
+        * { cursor: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA2UlEQVR4AeySgQrDIAxEnej/f7DCxkGVkZDFapLBWOGwpjF5uZpLKc93peAnB/dj7SZAay1Bww2W6RSYAE711bIMAC5AUU4wABXZOEEEgAuQtxMigPGgYjkVAC5AXk6oACK60YdlALgAWTuxDGA0MCtzGwAuQFZO3AZgIxwGtgHgAnTqxDbA4eDzuApQa02fNCttvqgAm3WXj4kAY+re+2NFyx1JoghA8ty2DIBO7tb5KswArnjYMgGiJx8TToARiF4zveHhANENab/v/wJKFL3/O/D7Dmh36gUAAP//rvicSwAAAAZJREFUAwDYwXJB2T1sHQAAAABJRU5ErkJggg==") 0 0, default !important; }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            overscroll-behavior: none;
+            background: var(--terminal-background);
+            font-family: "Departure Mono", "Airlock Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            margin-top: 4rem;
-            padding: 4rem 6rem;
-            height: 60vh;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            height: 100dvh;
+            max-width: 1360px;
+            margin-inline: auto;
+            padding: clamp(12px, 2vw, 28px);
+            padding-top: clamp(12px, 5vh, 56px);
+            -webkit-user-select: none;
+            user-select: none;
+            background: var(--terminal-background);
+            color: var(--terminal-foreground);
+            color-scheme: dark;
+            font-family: var(--terminal-fontFamily, inherit);
+            font-size: var(--terminal-fontSize, 16.5px);
+        }
+
+        header {
             display: flex;
-            justify-content: center;
+            flex-wrap: wrap;
             align-items: center;
-            background-color: #f5f5f5;
+            gap: 0.25rem 1rem;
+            padding: 0.4rem 0.75rem;
+            background: var(--terminal-background);
+            font-size: inherit;
         }
 
-        .box {
-            position: relative;
-            background-color: white;
-            padding: 2rem 3rem;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-            font-size: 1.5rem;
-            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-            color: #333;
+        a {
+            color: var(--terminal-foreground);
+            text-decoration: underline solid currentColor 1px;
         }
 
-        .github-link {
-            position: absolute;
-            top: 0.65rem;
-            right: 0.85rem;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            font-size: 0.7rem;
-            color: #666;
+        a:hover,
+        a:focus-visible {
+            color: var(--terminal-brightYellow);
             text-decoration: none;
         }
 
-        .github-link:hover,
-        .github-link:focus-visible {
-            color: #000;
-            text-decoration: underline;
+        .brand {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            min-height: 40px;
+            padding-left: 76px;
         }
 
-        @media (max-width: 30rem) {
-            body {
-                margin-top: 0;
-                padding: 2rem 1rem;
-            }
+        .brand img {
+            position: absolute;
+            left: 0;
+            width: 64px;
+            height: 40px;
+            object-fit: cover;
+            image-rendering: pixelated;
+        }
 
-            .box {
-                padding: 1.25rem 1.5rem;
-                font-size: 1rem;
-                white-space: nowrap;
+        #copy-ssh {
+            border: 0;
+            background: none;
+            color: var(--terminal-foreground);
+            font: inherit;
+            text-decoration: none;
+            outline: none;
+        }
+
+        #copy-ssh:hover,
+        #copy-ssh:focus-visible {
+            color: var(--terminal-brightYellow);
+        }
+
+        #copy-ssh:focus-visible {
+            text-decoration: underline solid currentColor 1px;
+            text-underline-offset: 3px;
+        }
+
+        /* Buttons are unselectable by default; the visible command must highlight. */
+        #copy-ssh span {
+            -webkit-user-select: text;
+            user-select: text;
+        }
+
+        #copy-ssh span::selection {
+            background: var(--terminal-foreground);
+            color: var(--terminal-background);
+        }
+
+        #copy-hint {
+            color: var(--terminal-foreground);
+            opacity: 0.6;
+            font-size: 11px;
+        }
+
+        #copy-hint[data-state="error"] {
+            opacity: 1;
+            color: var(--terminal-red);
+        }
+
+        #status {
+            flex: 1;
+            min-width: 0;
+            color: var(--terminal-cyan);
+        }
+
+        #status[data-state="error"] {
+            color: var(--terminal-red);
+        }
+
+        #restart {
+            padding: 0.15rem 0.6rem;
+            border: 1px solid var(--terminal-black);
+            border-radius: 4px;
+            background: var(--terminal-background);
+            color: inherit;
+            font: inherit;
+        }
+
+        #restart:hover,
+        #restart:focus-visible {
+            border-color: var(--terminal-brightBlue);
+            background: var(--terminal-black);
+        }
+
+        #terminal-frame {
+            position: relative;
+            display: grid;
+            grid-template-rows: minmax(0, 1fr);
+            min-width: 0;
+            min-height: 0;
+            max-height: 900px;
+            padding: 16px;
+        }
+
+        /* Nine-slice only the artwork; never scale or overlay the terminal. */
+        #terminal-frame::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border: 16px solid transparent;
+            border-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA5UlEQVR4AeyWwQ0CMQwE4brgRwv0XwQt8KMM0EQ3kYPCh1jHx0irvThmvPIr2/Nxf/1T22n/Xa6385Hax55aAAZTiJvgnKlPtjNbAAbRgHvhmdqqZM3YPQBDbNCpZUmmLncIYFLdpgyXqcvsAUxmg2cbV1zWjN0DMIBGxTlTcvHIHQLEi6O+K0BtoDZQG6gN1AZqA7WBYQM8mVT2g0QuHtk9gBc+mTzH5l+/Zc3YPQBwG3RqWZKpyx0CmFS3KcNl6jJ7AJPZ4NnGFZc1Y7cA8YJmtDJw9l+YintntgAWKGbrG4+Z6A0AAP//Rm6OAAAAAAZJREFUAwAIqGrwhhI+aAAAAABJRU5ErkJggg==") 8 / 16px stretch;
+            image-rendering: pixelated;
+            pointer-events: none;
+        }
+
+        #terminal-container {
+            min-height: 0;
+            padding: 4px;
+            overflow: hidden;
+            caret-color: transparent;
+        }
+
+        /* Share the whole-cell grid's spare pixels instead of leaving them on the right. */
+        #terminal-container > canvas {
+            margin-inline: auto;
+            right: 0;
+        }
+
+        @media (max-width: 640px) {
+            #terminal-frame { padding: 8px; }
+            #terminal-frame::before {
+                border-width: 8px;
+                border-image-width: 8px;
             }
         }
+        @media (max-width: 640px), (max-height: 600px) {
+            :root { --terminal-fontSize: 11px; }
+            body { padding-top: 12px; }
+        }
+        #loading {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1ch;
+            pointer-events: none;
+            visibility: hidden;
+            animation: show-loading 0s 500ms forwards;
+        }
+
+        #loading[hidden] { display: none; }
+        .loading-label { opacity: 0.6; }
+        .loading-moon { width: 2ch; color: var(--terminal-brightYellow); }
+        .loading-moon::before {
+            content: "🌑";
+            /* Match main.go's eight moon phases at one frame per 125ms. */
+            animation: moon-phase 1s steps(1, end) 500ms infinite;
+        }
+        @keyframes moon-phase {
+            0%, 100% { content: "🌑"; }
+            12.5% { content: "🌒"; }
+            25% { content: "🌓"; }
+            37.5% { content: "🌔"; }
+            50% { content: "🌕"; }
+            62.5% { content: "🌖"; }
+            75% { content: "🌗"; }
+            87.5% { content: "🌘"; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .loading-moon::before { animation: none; }
+        }
+        @keyframes show-loading { to { visibility: visible; } }
     </style>
 </head>
 <body>
-    <div class="box">
-        <a class="github-link" href="https://github.com/kamaln7/airlock.space" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
-        ssh airlock.space
+    <header>
+        <div class="brand">
+            <img src="src/art/saturn.png" width="64" height="40" alt="" draggable="false">
+            <button id="copy-ssh" type="button"><span>ssh airlock.space</span></button>
+            <small id="copy-hint" role="status">try it in your terminal!</small>
+        </div>
+        <p id="status" role="status"></p>
+        <button id="restart" type="button" hidden>Restart</button>
+        <a href="https://github.com/kamaln7/airlock.space" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+    </header>
+    <div id="terminal-frame">
+        <div id="terminal-container"></div>
+        <div id="loading" role="status"><span class="loading-moon" aria-hidden="true"></span><span class="loading-label">loading...</span></div>
     </div>
+    <script type="module" src="src/app.js"></script>
 </body>
 </html>

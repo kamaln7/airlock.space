@@ -165,6 +165,12 @@ func (w *wirePicture) entry() (*Picture, error) {
 
 // getJSON decodes one JSON response directly from the HTTP body.
 func (c *Client) getJSON(ctx context.Context, path string, dst any) error {
+	// Fetch-backed clients need the deadline on the request context.
+	if timeout := c.httpClient.Timeout; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
@@ -176,9 +182,16 @@ func (c *Client) getJSON(ctx context.Context, path string, dst any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if ctx.Done() != nil {
+		stop := context.AfterFunc(ctx, func() { resp.Body.Close() })
+		defer stop()
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if msg := strings.TrimSpace(string(snippet)); msg != "" {
 			return fmt.Errorf("unexpected HTTP status %s: %s", resp.Status, msg)
 		}
@@ -189,5 +202,9 @@ func (c *Client) getJSON(ctx context.Context, path string, dst any) error {
 	if lim := c.maxResponseBytes; lim > 0 {
 		body = io.LimitReader(resp.Body, lim)
 	}
-	return json.NewDecoder(body).Decode(dst)
+	err = json.NewDecoder(body).Decode(dst)
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }

@@ -1,0 +1,28 @@
+Inline Bolted frame in index.html
+  Frames 1-Bit by piiixl
+  https://piiixl.itch.io/frames-1-bit
+  Creative Commons Attribution 4.0 International
+  https://creativecommons.org/licenses/by/4.0/
+  Adapted from Frames32px.png: cropped the bolted 32x32 frame at (128, 0),
+  removed the demonstration lettering, made the background transparent,
+  and changed the foreground to #e7e0cf.
+  The page embeds the PNG as base64 and uses CSS nine-slice borders;
+  the terminal content is not scaled.
+
+Inline pixel cursor in index.html
+  Pixelated cursors 16x16 by tadaskay
+  https://tadaskay.itch.io/pixelated-cursors-16x16
+  Creator's permission: "Free to use in any personal or commercial project."
+  Adapted from cursor.png: enlarged 2x with nearest-neighbor sampling and
+  embedded as a base64 PNG.
+
+src/art/saturn.png
+  User-supplied 1bit-dither (1).png Saturn artwork, copied without changes.
+  The header center-crops its background padding to fit a 64x40 display area;
+  the artwork is not stretched.
+
+favicon.png
+  User-supplied 1bit-dither (2).png Saturn artwork. Pure-black pixels were made
+  transparent; all other pixel colors were retained.
+
+The project's code license does not relicense these third-party artworks.

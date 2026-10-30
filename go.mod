@@ -1,18 +1,19 @@
 module github.com/kamaln7/airlock.space
 
-go 1.27.2
+go 1.26.8
 
 require (
 	charm.land/bubbles/v2 v2.2.1
-	charm.land/bubbletea/v2 v2.1.0
+	charm.land/bubbletea/v2 v2.1.1
 	charm.land/glamour/v2 v2.0.2-0.20261008113136-f71347d1b2f3
 	charm.land/lipgloss/v2 v2.0.6
 	charm.land/log/v2 v2.0.1
 	charm.land/ssh v0.4.3
 	charm.land/wish/v2 v2.0.5
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
+	github.com/NimbleMarkets/go-booba v0.10.7
 	github.com/charmbracelet/colorprofile v0.4.3
-	github.com/charmbracelet/ultraviolet v0.0.0-20261008173134-6b8d4baf91b4
+	github.com/charmbracelet/ultraviolet v0.0.0-20261023060817-a45b7c86333f
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/kamaln7/resolvable/v2 v2.0.0-20260821172050-22a78c0b5c82
 	github.com/samber/lo v1.53.0
@@ -45,11 +46,20 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/xo/terminfo v1.2.0 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20261013213113-2ab7f3cbc5fb // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
+
+// Browser builds need the js/wasm support in Bubble Tea PR #1693.
+replace charm.land/bubbletea/v2 => github.com/neomantra/bubbletea/v2 v2.0.0-20261020122444-536722b0bdb6
+
+// Booba embeds the six Ghostty fixes from kamal/integration.
+replace github.com/NimbleMarkets/go-booba => github.com/kamaln7/go-booba v0.10.8-0.20261030153754-9ce2572c1c93
+
+tool github.com/NimbleMarkets/go-booba/cmd/booba-assets

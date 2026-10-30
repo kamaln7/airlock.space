@@ -1,0 +1,305 @@
+--- a/site/.generated/ghostty-web/ghostty-web.js
++++ b/site/.generated/ghostty-web/ghostty-web.js
+@@ -3935,7 +3935,7 @@ const ai = class hQ {
+       y: Math.max(0, E),
+       viewportX: C,
+       viewportY: E,
+-      visible: g,
++      visible: g && this.cursorVisible !== !1,
+       blinking: B,
+       style: i
+     };
+@@ -6507,7 +6507,7 @@ class es {
+   }
+ }
+ function ci(I) {
+-  return I.ctrlKey || I.metaKey ? !0 : I.type === "pointerup" && I.pointerType === "touch";
++  return !0;
+ }
+ class as {
+   constructor(A) {
+@@ -6934,6 +6934,7 @@ function Ji(I, A, g, B, Q) {
+   var U, H, l;
+   const C = I;
+   C.fill(0);
++  const hoverUnderline = Q.hoveredLinkRange && !A.isAlternateScreen();
+   const E = A.getDimensions(), i = (B == null ? void 0 : B.getScrollbackLength()) ?? 0, o = A.getCursor(), D = ((U = Q.selectionManager) == null ? void 0 : U.getSelectionCoords()) ?? null, w = ((H = Q.selectionManager) == null ? void 0 : H.getSelectionColumnSpace()) === "logical";
+   let s = -1, t = -1;
+   const h = (N) => {
+@@ -6983,7 +6984,10 @@ function Ji(I, A, g, B, Q) {
+       const UA = w ? p : r;
+       if (UA >= s && UA <= t && (d |= Js), n.hyperlink_id !== 0 && n.hyperlink_id === Q.hoveredHyperlinkId && (d |= ys), Q.hoveredLinkRange) {
+         const z = Q.hoveredLinkRange;
+-        (N === z.startY && p >= z.startX && (N < z.endY || p <= z.endX) || N > z.startY && N < z.endY || N === z.endY && p <= z.endX && (N > z.startY || p >= z.startX)) && (d |= Ss);
++        if (N === z.startY && p >= z.startX && (N < z.endY || p <= z.endX) || N > z.startY && N < z.endY || N === z.endY && p <= z.endX && (N > z.startY || p >= z.startX)) {
++          d |= Ss;
++          d = hoverUnderline ? d | Gs : d & ~Gs;
++        }
+       }
+       const V = n.codepoint || 0;
+       if (A.getImageFrame && V === tg && (d |= ug), Q.kittyEnabled && !A.getImageFrame && V === tg) {
+@@ -7307,6 +7311,7 @@ class FE {
+     this.lastCursorVisible = Q.visible, this.lastCursorBlinkVisible = C, this.lastSelectionSig = i ?? this.computeSelectionSig(), this.lastKittyPlacementSig = o ?? this.computeKittyPlacementSig(A);
+     const D = this.invalidateNext;
+     this.invalidateNext = !1, this.currentBuffer = A, this.currentRenderBuffer = A;
++    this.hoverUnderline = !A.isAlternateScreen();
+     const w = A.getCursor(), s = A.getDimensions();
+     let t;
+     const h = (M) => M < 0 || M >= s.rows ? null : (t ?? (t = A.getViewport()), t.slice(M * s.cols, (M + 1) * s.cols));
+@@ -7452,11 +7457,15 @@ class FE {
+     if (A.codepoint === tg && (this.imageFrame || this.renderPlaceholderCell(A, g, B)) || A.flags & T.INVISIBLE)
+       return;
+     const s = this.isInSelection(g, i, B);
++    const range = this.hoveredLinkRange;
++    const hovered = !!range && (B === range.startY && i >= range.startX && (B < range.endY || i <= range.endX) || B > range.startY && B < range.endY || B === range.endY && i <= range.endX && (B > range.startY || i >= range.startX));
+     let t = "";
+     if (A.flags & T.ITALIC && (t += "italic "), A.flags & T.BOLD && (t += "bold "), this.ctx.font = `${t}${this.fontSize}px ${this.fontFamily}`, Q)
+       this.ctx.fillStyle = Q;
+     else if (s)
+       this.ctx.fillStyle = this.theme.selectionForeground;
++    else if (hovered && !(A.flags & T.INVERSE))
++      this.ctx.fillStyle = this.theme.brightYellow;
+     else {
+       let G = A.fg_r, S = A.fg_g, U = A.fg_b;
+       A.flags & T.INVERSE && (G = A.bg_r, S = A.bg_g, U = A.bg_b);
+@@ -7473,25 +7482,14 @@ class FE {
+       w,
+       this.metrics.height,
+       this.fontSize
+-    ) || this.renderBlockElement(A.codepoint, o, D, w)) || this.ctx.fillText(L, h, a), A.flags & T.FAINT && (this.ctx.globalAlpha = 1), A.flags & T.UNDERLINE) {
++    ) || this.renderBlockElement(A.codepoint, o, D, w)) || this.ctx.fillText(L, h, a), A.flags & T.FAINT && (this.ctx.globalAlpha = 1), (hovered ? this.hoverUnderline : A.flags & T.UNDERLINE)) {
+       const G = D + this.metrics.baseline + 2;
+-      this.ctx.strokeStyle = this.ctx.fillStyle, this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(o, G), this.ctx.lineTo(o + w, G), this.ctx.stroke();
++      this.ctx.strokeStyle = this.ctx.fillStyle, this.ctx.lineWidth = 1 / (window.devicePixelRatio || 1), this.ctx.beginPath(), this.ctx.moveTo(o, G), this.ctx.lineTo(o + w, G), this.ctx.stroke();
+     }
+     if (A.flags & T.STRIKETHROUGH) {
+       const G = D + this.metrics.height / 2;
+       this.ctx.strokeStyle = this.ctx.fillStyle, this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(o, G), this.ctx.lineTo(o + w, G), this.ctx.stroke();
+     }
+-    if (A.hyperlink_id > 0 && A.hyperlink_id === this.hoveredHyperlinkId) {
+-      const S = D + this.metrics.baseline + 2;
+-      this.ctx.strokeStyle = "#4A90E2", this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(o, S), this.ctx.lineTo(o + w, S), this.ctx.stroke();
+-    }
+-    if (this.hoveredLinkRange) {
+-      const G = this.hoveredLinkRange;
+-      if (B === G.startY && i >= G.startX && (B < G.endY || i <= G.endX) || B > G.startY && B < G.endY || B === G.endY && i <= G.endX && (B > G.startY || i >= G.startX)) {
+-        const U = D + this.metrics.baseline + 2;
+-        this.ctx.strokeStyle = "#4A90E2", this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(o, U), this.ctx.lineTo(o + w, U), this.ctx.stroke();
+-      }
+-    }
+   }
+   /**
+    * Composite all visible kitty graphics placements onto the canvas.
+@@ -8137,6 +8135,8 @@ void main() {
+   vec3 bg = unpackRgb(cellBg);
+   if ((flags & FLAG_USE_THEME_FG) != 0u) fg = pal.defaultFg.rgb;
+   if ((flags & FLAG_USE_THEME_BG) != 0u) bg = pal.defaultBg.rgb;
++  bool hoverActive = (flags & FLAG_IS_LINK_RANGE_HOVERED) != 0u;
++  if (hoverActive && (flags & FLAG_INVERSE) == 0u) fg = pal.ansi[11].rgb;
+   if ((flags & FLAG_INVERSE) != 0u) { vec3 tmp = fg; fg = bg; bg = tmp; }
+   if ((flags & FLAG_IS_SELECTED) != 0u) { bg = pal.selectionBg.rgb; fg = pal.selectionFg.rgb; }
+   if ((flags & FLAG_IS_CURSOR_CELL) != 0u) { bg = pal.cursorBg.rgb; fg = pal.cursorFg.rgb; }
+@@ -8179,15 +8179,11 @@ void main() {
+     ? bg * (1.0 - texel.a * fade) + texel.rgb * fade
+     : mix(bg, fg, texel.a * fade);
+   float baselineFrac = 0.85;
+-  float underlineThickness = 1.0 / grid.cellSize.y;
+-  bool hoverActive = (flags & (FLAG_IS_HYPERLINK_HOVERED | FLAG_IS_LINK_RANGE_HOVERED)) != 0u;
+-  if (hoverActive && vUv.y >= baselineFrac && vUv.y < baselineFrac + underlineThickness * 2.0) {
+-    fragColor = pal.linkUnderlineColor; return;
+-  }
+-  if ((flags & FLAG_UNDERLINE) != 0u && vUv.y >= baselineFrac && vUv.y < baselineFrac + underlineThickness * 2.0) {
++  float underlineThickness = 1.0 / (grid.cellSize.y * grid.dpr);
++  if ((flags & FLAG_UNDERLINE) != 0u && vUv.y >= baselineFrac && vUv.y < baselineFrac + underlineThickness) {
+     fragColor = vec4(fg, 1.0); return;
+   }
+-  if ((flags & FLAG_STRIKETHROUGH) != 0u && abs(vUv.y - 0.5) < underlineThickness) {
++  if ((flags & FLAG_STRIKETHROUGH) != 0u && abs(vUv.y - 0.5) < 1.0 / grid.cellSize.y) {
+     fragColor = vec4(fg, 1.0); return;
+   }
+   fragColor = vec4(outRgb, uTextPass == 2 ? texel.a * fade : 1.0);
+@@ -8861,6 +8857,8 @@ fn fsMain(in: VOut) -> @location(0) vec4<f32> {
+   var bg = unpackRgb(cell.bg);
+   if ((flags & FLAG_USE_THEME_FG) != 0u) { fg = pal.defaultFg.rgb; }
+   if ((flags & FLAG_USE_THEME_BG) != 0u) { bg = pal.defaultBg.rgb; }
++  let hoverActive = (flags & FLAG_IS_LINK_RANGE_HOVERED) != 0u;
++  if (hoverActive && (flags & FLAG_INVERSE) == 0u) { fg = pal.ansi[11].rgb; }
+   if ((flags & FLAG_INVERSE) != 0u) {
+     let tmp = fg; fg = bg; bg = tmp;
+   }
+@@ -8941,21 +8939,15 @@ fn fsMain(in: VOut) -> @location(0) vec4<f32> {
+ 
+   // Underline (thin line near baseline) and strikethrough (mid-cell).
+   let baselineFrac = 0.85;       // matches CanvasRenderer's renderCellText
+-  let underlineThickness = 1.0 / grid.cellSize.y;
+-  let hoverActive = (flags & (FLAG_IS_HYPERLINK_HOVERED | FLAG_IS_LINK_RANGE_HOVERED)) != 0u;
+-  if (hoverActive) {
+-    if (in.uv.y >= baselineFrac && in.uv.y < baselineFrac + underlineThickness * 2.0) {
+-      return pal.linkUnderlineColor;
+-    }
+-  }
++  let underlineThickness = 1.0 / (grid.cellSize.y * grid.dpr);
+   if ((flags & FLAG_UNDERLINE) != 0u) {
+-    if (in.uv.y >= baselineFrac && in.uv.y < baselineFrac + underlineThickness * 2.0) {
++    if (in.uv.y >= baselineFrac && in.uv.y < baselineFrac + underlineThickness) {
+       return vec4<f32>(fg, 1.0);
+     }
+   }
+   if ((flags & FLAG_STRIKETHROUGH) != 0u) {
+     let strikeMid = 0.5;
+-    if (abs(in.uv.y - strikeMid) < underlineThickness) {
++    if (abs(in.uv.y - strikeMid) < 1.0 / grid.cellSize.y) {
+       return vec4<f32>(fg, 1.0);
+     }
+   }
+@@ -9989,6 +9981,8 @@ const gB = class jg {
+    * Attach mouse event listeners to canvas
+    */
+   attachEventListeners() {
++    if (this.terminal.options.disableSelection)
++      return;
+     const A = this.renderer.canvas;
+     A.addEventListener("mousedown", (g) => {
+       if (g.button === 0) {
+@@ -10299,6 +10293,8 @@ const Hi = class aQ {
+       const B = this.wasmTerm.getCursor();
+       B.y !== this.lastCursorY && (this.lastCursorY = B.y, this.cursorMoveEmitter.fire()), B.style !== this.lastCursorStyle && (this.lastCursorStyle !== void 0 && ((C = this.renderer) == null || C.setCursorStyle(B.style)), this.lastCursorStyle = B.style);
+     }, this.handleMouseMove = (B) => {
++      if (this.linkPress && (Math.abs(B.clientX - this.linkPress.x) > 4 || Math.abs(B.clientY - this.linkPress.y) > 4))
++        this.linkPress = void 0;
+       if (!(!this.canvas || !this.renderer || !this.wasmTerm)) {
+         if (this.isDraggingScrollbar) {
+           this.processScrollbarDrag(B);
+@@ -10318,6 +10314,7 @@ const Hi = class aQ {
+         }
+       }
+     }, this.handleMouseLeave = () => {
++      this.linkPress = void 0;
+       var B, Q;
+       this.renderer && this.wasmTerm && this.renderer.setHoveredLinkRange(null), this.currentHoveredLink && ((Q = (B = this.currentHoveredLink).hover) == null || Q.call(B, !1), this.currentHoveredLink = void 0, this.element && (this.element.style.cursor = "text", this.canvas && (this.canvas.style.cursor = "text")));
+     }, this.handlePointerDown = (B) => {
+@@ -10339,6 +10336,15 @@ const Hi = class aQ {
+     }, this.handlePointerCancel = (B) => {
+       B.pointerType === "touch" && (this.activeTouchPointers.delete(B.pointerId), this.touchLinkPress = void 0);
+     }, this.handleClick = async (B) => {
++      if (B.type !== "pointerup") {
++        const press = this.linkPress;
++        this.linkPress = void 0;
++        if (!press || B.button !== 0 || B.detail > 1 || B.shiftKey)
++          return;
++        const from = this.getCellAt(press.x, press.y), to = this.getCellAt(B.clientX, B.clientY);
++        if (!from || !to || from.x !== to.x || from.y !== to.y || Math.abs(B.clientX - press.x) > 4 || Math.abs(B.clientY - press.y) > 4)
++          return;
++      }
+       if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm)
+         return;
+       const Q = this.getCellAt(B.clientX, B.clientY);
+@@ -10383,6 +10389,7 @@ const Hi = class aQ {
+         }
+       }
+     }, this.handleMouseDown = (B) => {
++      this.linkPress = B.button === 0 ? { x: B.clientX, y: B.clientY } : void 0;
+       var o;
+       if (!this.canvas || !this.renderer || !this.wasmTerm)
+         return;
+@@ -10407,6 +10414,7 @@ const Hi = class aQ {
+       cols: A.cols ?? 80,
+       rows: A.rows ?? 24,
+       cursorBlink: A.cursorBlink ?? !1,
++      cursorVisible: A.cursorVisible ?? !0,
+       cursorStyle: A.cursorStyle ?? "block",
+       theme: A.theme ?? {},
+       scrollback: A.scrollback ?? 1e4,
+@@ -10416,6 +10424,7 @@ const Hi = class aQ {
+       allowTransparency: A.allowTransparency ?? !1,
+       convertEol: A.convertEol ?? !1,
+       disableStdin: A.disableStdin ?? !1,
++      disableSelection: A.disableSelection ?? !1,
+       smoothScrollDuration: A.smoothScrollDuration ?? 100,
+       // Default: 100ms smooth scroll
+       renderer: A.renderer ?? "auto"
+@@ -10445,8 +10454,10 @@ const Hi = class aQ {
+       switch (A) {
+         case "disableStdin":
+           break;
++        case "cursorVisible":
+         case "cursorBlink":
+         case "cursorStyle":
++          this.wasmTerm && (this.wasmTerm.cursorVisible = this.options.cursorVisible);
+           this.renderer && (this.renderer.setCursorStyle(this.options.cursorStyle), this.renderer.setCursorBlink(this.options.cursorBlink));
+           break;
+         case "theme":
+@@ -10571,11 +10582,10 @@ const Hi = class aQ {
+     try {
+       if (await Qs(this.options.fontFaces), this.isDisposed)
+         throw new Error("Terminal has been disposed");
+-      A.hasAttribute("tabindex") || A.setAttribute("tabindex", "0"), A.setAttribute("contenteditable", "true"), A.addEventListener("beforeinput", (Q) => {
+-        Q.target === A && Q.preventDefault();
+-      }), A.setAttribute("role", "textbox"), A.setAttribute("aria-label", "Terminal input"), A.setAttribute("aria-multiline", "true");
++      A.hasAttribute("tabindex") || A.setAttribute("tabindex", "0"), A.setAttribute("role", "application"), A.setAttribute("aria-label", "Airlock terminal");
+       const g = this.buildWasmConfig();
+-      this.wasmTerm = this.ghostty.createTerminal(this.cols, this.rows, g), this.syncProgramStatusHandler(), this.canvas = document.createElement("canvas"), this.canvas.style.display = "block", this.canvas.style.cursor = "text", A.appendChild(this.canvas), this.textarea = document.createElement("textarea"), this.textarea.setAttribute("autocorrect", "off"), this.textarea.setAttribute("autocapitalize", "off"), this.textarea.setAttribute("spellcheck", "false"), this.textarea.setAttribute("tabindex", "0"), this.textarea.setAttribute("aria-label", "Terminal input"), this.textarea.style.position = "absolute", this.textarea.style.left = "0", this.textarea.style.top = "0", this.textarea.style.width = "1px", this.textarea.style.height = "1px", this.textarea.style.padding = "0", this.textarea.style.border = "none", this.textarea.style.margin = "0", this.textarea.style.opacity = "0", this.textarea.style.clipPath = "inset(50%)", this.textarea.style.overflow = "hidden", this.textarea.style.whiteSpace = "nowrap", this.textarea.style.resize = "none", A.appendChild(this.textarea), this.attachCanvasFocusListeners(this.canvas, this.textarea);
++      this.wasmTerm = this.ghostty.createTerminal(this.cols, this.rows, g), this.syncProgramStatusHandler(), this.canvas = document.createElement("canvas"), this.canvas.style.display = "block", this.canvas.style.cursor = "text", A.appendChild(this.canvas), this.attachCanvasFocusListeners(this.canvas);
++      this.wasmTerm.cursorVisible = this.options.cursorVisible;
+       const B = document.createElement("canvas");
+       B.style.position = "absolute", B.style.left = "0", B.style.top = "0", B.style.pointerEvents = "none", B.style.zIndex = "2", A.style.position = A.style.position || "relative", A.appendChild(B), this.scrollbarCanvas = B, this.scrollbarOverlay = new Zs(B, window.devicePixelRatio || 1), this.renderer = await WB(this.options.renderer ?? "auto", this.canvas, {
+         fontSize: this.options.fontSize,
+@@ -10652,13 +10662,13 @@ const Hi = class aQ {
+           return ((s = this.wasmTerm) == null ? void 0 : s.getMode(w, !1)) ?? !1;
+         },
+         () => this.copySelection(),
+-        this.textarea,
++        null,
+         i
+       ), this.selectionManager = new UE(
+         this,
+         this.renderer,
+         this.wasmTerm,
+-        this.textarea,
++        null,
+         this.bidiMapper
+       ), this.renderer.setSelectionManager(this.selectionManager), (Q = (B = this.renderer).setBidiMapper) == null || Q.call(B, this.bidiMapper), this.selectionManager.onSelectionChange(() => {
+         this.selectionChangeEmitter.fire(), this.requestRender();
+@@ -10676,12 +10686,12 @@ const Hi = class aQ {
+         }));
+       }, D = async (w, s) => {
+         var t, h, a, e;
+-        if (!(this.isDisposed || !this.canvas || !this.textarea || !this.wasmTerm) && !this.isSwapping) {
++        if (!(this.isDisposed || !this.canvas || !this.wasmTerm) && !this.isSwapping) {
+           this.isSwapping = !0;
+           try {
+             console.warn(`[ghostty-web] renderer falling back to ${w}:`, s), (t = this.renderer) == null || t.destroy(), (h = this.selectionManager) == null || h.dispose();
+             const F = this.canvas;
+-            this.canvas = this.replaceCanvas(F), this.attachCanvasFocusListeners(this.canvas, this.textarea);
++            this.canvas = this.replaceCanvas(F), this.attachCanvasFocusListeners(this.canvas);
+             try {
+               this.renderer = await WB(w, this.canvas, {
+                 fontSize: this.options.fontSize,
+@@ -10703,7 +10713,7 @@ const Hi = class aQ {
+               this,
+               this.renderer,
+               this.wasmTerm,
+-              this.textarea,
++              null,
+               this.bidiMapper
+             ), this.renderer.setSelectionManager(this.selectionManager), (e = (a = this.renderer).setBidiMapper) == null || e.call(a, this.bidiMapper), this.selectionManager.onSelectionChange(() => {
+               this.selectionChangeEmitter.fire(), this.requestRender();
+@@ -11102,14 +11112,14 @@ const Hi = class aQ {
+     return this.wasmTerm ? this.wasmTerm.getScrollbackLength() : 0;
+   }
+   /**
+-   * Attach the click-to-focus-textarea listeners on a canvas. Extracted so
++   * Focus the keyboard-only terminal from mouse and touch events. Extracted so
+    * the renderer-swap path can re-attach them after canvas replacement.
+    */
+-  attachCanvasFocusListeners(A, g) {
++  attachCanvasFocusListeners(A) {
+     A.addEventListener("mousedown", (B) => {
+-      B.preventDefault(), g.focus();
++      B.preventDefault(), this.focus();
+     }), A.addEventListener("touchend", (B) => {
+-      B.preventDefault(), g.focus();
++      B.preventDefault(), this.focus();
+     });
+   }
+   /**

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -54,8 +55,8 @@ func (m *Model) explanationStyle() glamouransi.StyleConfig {
 		Enumeration: glamouransi.StylePrimitive{BlockPrefix: ". "},
 
 		// a link is its label alone, however Glamour is asked to draw it
-		Link:     glamouransi.StylePrimitive{Color: hexColor(m.color(colorLink)), Underline: on},
-		LinkText: glamouransi.StylePrimitive{Color: hexColor(m.color(colorLink)), Underline: on},
+		Link:     glamouransi.StylePrimitive{Underline: on},
+		LinkText: glamouransi.StylePrimitive{Underline: on},
 	}
 }
 
@@ -131,7 +132,6 @@ var (
 	colorNebula     = adaptive{lipgloss.Color("#B4A7D6"), lipgloss.Color("#6B4E8C")} // Purple nebula tones
 	colorCosmic     = adaptive{lipgloss.Color("#A7D6D6"), lipgloss.Color("#4E8C8C")} // Deep space teal
 	colorStellar    = adaptive{lipgloss.Color("#D6B4A7"), lipgloss.Color("#8C6B4E")} // Warm star glow
-	colorLink       = adaptive{lipgloss.Color("#2F7F7F"), lipgloss.Color("#7FD1D1")} // Teal that stays readable as text, unlike the decorative tones
 	colorYellow     = lipgloss.Color("220")
 )
 
@@ -381,7 +381,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r := []rune(helpKey)[0]
 				return m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 			}
-			if onLink {
+			// in the browser the terminal opens the link itself on click, so
+			// copying it here would flash feedback over a link that just opened
+			if onLink && runtime.GOOS != "js" {
 				cmds = append(cmds, m.copyLink())
 			}
 			// selection can start anywhere; it only ever applies to copyable text
@@ -877,7 +879,7 @@ func (m *Model) viewLinkLine() string {
 	link := m.apod.ArticleURL
 	st := m.txtMuted()
 	if m.hoverLink {
-		st = m.txtYellow().Underline(true)
+		st = m.txtYellow()
 	}
 	// hyperlink outside the style, never inside: lipgloss styles rune by rune
 	// under Underline, which shreds an embedded escape into literal text
@@ -988,17 +990,20 @@ func (m *Model) selBounds() (a, b point) {
 }
 
 // copyableSpan returns the column span of copyable text on a stripped frame
-// line: the APOD title (any view) or a line of the explanation. Everything
-// else — headers, dates, gaps, art, footer — is not selectable. It takes the
+// line: a line of the explanation, or the APOD title outside the browser.
+// Everything else — headers, dates, gaps, art, footer — is not selectable. It takes the
 // line rather than rendering the frame itself: it runs per row per drag event.
 func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 	if m.apod == nil {
 		return 0, 0, false
 	}
 
-	// the full title on one row (main screen header row, or its own row)
-	if s, e, found := columnSpan(line, m.apod.Title); found {
-		return s, e, true
+	// Native terminals also allow selecting the title; the website limits selection
+	// to the explanation.
+	if runtime.GOOS != "js" {
+		if s, e, found := columnSpan(line, m.apod.Title); found {
+			return s, e, true
+		}
 	}
 
 	// explanation rows, matched against the rendered text - what is on
@@ -1016,7 +1021,7 @@ func (m *Model) copyableSpan(line string) (x1, x2 int, ok bool) {
 		if trimmed == "" {
 			return 0, 0, false
 		}
-		if !slices.Contains(m.explRows, trimmed) && !strings.Contains(m.apod.Title, trimmed) {
+		if !slices.Contains(m.explRows, trimmed) && (runtime.GOOS == "js" || !strings.Contains(m.apod.Title, trimmed)) {
 			return 0, 0, false
 		}
 		x1 = colStart + ansi.StringWidth(seg) - ansi.StringWidth(trimmedLeft)
@@ -1095,9 +1100,7 @@ func columnSpan(line, substr string) (start, end int, ok bool) {
 // frameLine returns the ANSI-stripped screen row under y.
 func (m *Model) frameLine(y int) string {
 	lines := strings.Split(m.baseView(), "\n")
-	// a frame taller than the viewport scrolls: the screen shows its tail, so
-	// screen row y is that many lines further down the frame
-	y += max(0, len(lines)-m.Height)
+	// The alternate-screen renderer clips the bottom of an oversized frame.
 	if y < 0 || y >= len(lines) {
 		return ""
 	}
@@ -1392,7 +1395,7 @@ func Goodbye(width int, client string, a *apod.APOD) string {
 		art,
 		txt.Bold(true).Render(a.Title),
 		muted.Render("— "+a.Date.Format(time.DateOnly)),
-		yellow.Render(a.ArticleURL),
+		hyperlink(a.ArticleURL, yellow.Render(a.ArticleURL)),
 		msg)
 }
 

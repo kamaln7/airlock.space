@@ -21,3 +21,11 @@ jobs:
           cache: true
 
       - run: go test ./...
+
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31.11.3
+      - run: nix build .#site --print-build-logs

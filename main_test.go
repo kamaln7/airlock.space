@@ -98,28 +98,27 @@ func TestLongExplanationScrolls(t *testing.T) {
 	}
 }
 
-// a frame taller than the terminal shows its tail, so hit-testing has to
-// follow the rows actually on screen. The explanation scrolls now, so this
-// only arises on a terminal too short for the header furniture itself.
-func TestFrameLineFollowsTheVisibleRows(t *testing.T) {
+func TestVisibleDateArrowRemainsClickableWhenFrameOverflows(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
 	m.Height = 4
 
-	lines := strings.Split(m.baseView(), "\n")
-	if len(lines) <= m.Height {
-		t.Fatalf("fixture no longer overflows: %d lines in %d rows", len(lines), m.Height)
-	}
-	off := len(lines) - m.Height
-	for y := range m.Height {
-		if got, want := m.frameLine(y), ansi.Strip(lines[y+off]); got != want {
-			t.Fatalf("screen row %d = %q; want frame row %d, %q", y, got, y+off, want)
+	// Bubble Tea's alternate screen draws the first screenful of a tall frame.
+	lines := strings.Split(m.View().Content, "\n")
+	for y, line := range lines[:m.Height] {
+		line = ansi.Strip(line)
+		if at := strings.Index(line, "← Aug 19"); at >= 0 {
+			x := ansi.StringWidth(line[:at])
+			m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			if !m.date.Equal(day(2026, 8, 19)) {
+				t.Fatalf("clicking the visible previous-day arrow kept date %v", m.date)
+			}
+			return
 		}
 	}
+	t.Fatal("the previous-day arrow is not visible")
 }
 
-// lipgloss styles rune by rune under Underline, which shreds an escape
-// sequence embedded in the styled text: the hyperlink must wrap the styled
-// string, not the other way round. Only reproduces at a real color profile.
+// Hyperlinks wrap styled text so SGR styling cannot corrupt their OSC 8 escapes.
 func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
 	m := &Model{Width: 100, Height: 40, hoverLink: true,
 		apod: &apod.APOD{Picture: apodclient.Picture{Title: "A Test Nebula",
@@ -286,6 +285,32 @@ func TestHeaderArrowClickNavigates(t *testing.T) {
 	m.Update(tea.MouseClickMsg{X: (start + end) / 2, Y: row, Button: tea.MouseLeft})
 	if !m.date.Equal(day(2026, 8, 30)) {
 		t.Errorf("clicking the prev-day arrow moved to %v; want 2026-08-30", m.date)
+	}
+}
+
+// outside a browser nothing opens the footer URL on click, so the click copies it
+func TestFooterLinkClickCopiesNatively(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	lines := strings.Split(m.baseView(), "\n")
+	row := slices.IndexFunc(lines, func(l string) bool {
+		return strings.Contains(ansi.Strip(l), m.apod.ArticleURL)
+	})
+	if row < 0 {
+		t.Fatal("no footer link on the frame")
+	}
+	start, end, _ := columnSpan(ansi.Strip(lines[row]), m.apod.ArticleURL)
+
+	m.Update(tea.MouseClickMsg{X: (start + end) / 2, Y: row, Button: tea.MouseLeft})
+	if !m.copiedRecently {
+		t.Error("clicking the footer URL did not copy it")
+	}
+}
+
+func TestGoodbyeArticleURLIsClickable(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	got := clickable(cellsOf(Goodbye(100, "goodbye-link", m.apod)))[m.apod.ArticleURL]
+	if got != m.apod.ArticleURL {
+		t.Errorf("goodbye link text = %q; want the article URL %q", got, m.apod.ArticleURL)
 	}
 }
 

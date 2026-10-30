@@ -1,9 +1,11 @@
-.PHONY: help hooks ci update-vendor-hash
+.PHONY: help hooks ci update-vendor-hash web
 
 help:
 	@echo "make hooks                 register the vendor-hash pre-commit hook (once per clone)"
 	@echo "make update-vendor-hash    rewrite nix/package.nix vendorHash from go.sum"
 	@echo "make ci                    fail if vendorHash does not match go.sum"
+	@echo "make web                   build the browser TUI into site/dist/"
+	@echo "                           requires Node 24, TinyGo 0.44, and Binaryen 133"
 
 # Named hook in .gitconfig (Git 2.36+ / 2.55). Does not replace .git/hooks.
 # include.path is local to this clone; Git will not auto-run tracked hooks.
@@ -17,3 +19,6 @@ ci:
 
 update-vendor-hash:
 	./nix/vendor-hash.sh update
+
+web:
+	npm --prefix site run build

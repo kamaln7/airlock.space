@@ -3,6 +3,7 @@ package apod
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -245,6 +246,39 @@ func TestHTTPClientTimeout(t *testing.T) {
 	picture, err := c.Latest(context.Background())
 	if picture != nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got (%+v, %v); want nil picture and timeout", picture, err)
+	}
+}
+
+type streamingTransport struct{ body io.ReadCloser }
+
+func (s streamingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: s.body, Header: make(http.Header)}, nil
+}
+
+func TestCancellationWhileReadingBody(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	client := NewClient(WithHTTPClient(&http.Client{Transport: streamingTransport{reader}}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Latest(ctx)
+		done <- err
+	}()
+	// A partial JSON value ensures cancellation happens during a body read.
+	if _, err := writer.Write([]byte("[")); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request stayed blocked reading the body after cancellation")
 	}
 }
 

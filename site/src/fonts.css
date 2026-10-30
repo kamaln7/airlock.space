@@ -1,0 +1,44 @@
+/* Declare faces before first paint; the terminal waits for these same CSS faces. */
+@font-face {
+    font-family: "Airlock Mono";
+    src: url("fonts/AirlockMono-Light.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
+}
+
+@font-face {
+    font-family: "Airlock Mono";
+    src: url("fonts/AirlockMono-LightItalic.woff2") format("woff2");
+    font-weight: 400;
+    font-style: italic;
+    font-display: block;
+    font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
+}
+
+@font-face {
+    font-family: "Airlock Mono";
+    src: url("fonts/AirlockMono-Bold.woff2") format("woff2");
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
+}
+
+@font-face {
+    font-family: "Airlock Mono";
+    src: url("fonts/AirlockMono-BoldItalic.woff2") format("woff2");
+    font-weight: 700;
+    font-style: italic;
+    font-display: block;
+    font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
+}
+
+@font-face {
+    font-family: "Departure Mono";
+    src: url("fonts/DepartureMono-Regular.otf") format("opentype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+}

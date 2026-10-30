@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ import (
 
 // live is the process-wide APOD fetcher the TUI calls through Today/ByDate.
 var live = &apod{client: apodclient.NewClient(
-	apodclient.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}),
+	apodclient.WithHTTPClient(&http.Client{Transport: http.DefaultTransport, Timeout: 15 * time.Second}),
 )}
 
 var Today = resolvable.New(
@@ -212,6 +213,10 @@ var errNotAnImage = errors.New("not an image")
 var cacheDir = imageCacheDir()
 
 func imageCacheDir() string {
+	// Browsers use HTTP caching and the in-memory day cache, not a filesystem.
+	if runtime.GOOS == "js" {
+		return ""
+	}
 	dir, _, _ := strings.Cut(os.Getenv("STATE_DIRECTORY"), ":") // systemd may list several
 	if dir == "" {
 		d, err := os.UserCacheDir()
@@ -378,6 +383,8 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("downloading image: %w", err)
 	}
 	defer resp.Body.Close()
+	stop := context.AfterFunc(ctx, func() { resp.Body.Close() })
+	defer stop()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("downloading image: status %d", resp.StatusCode)
@@ -389,6 +396,9 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return nil, fmt.Errorf("reading image body: %w", err)
 	}
 	return body, nil
