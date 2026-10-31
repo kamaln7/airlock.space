@@ -376,7 +376,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyCopySelection):
 			cmds = append(cmds, m.copySelection())
 		case key.Matches(msg, keyCopy):
-			if m.apod != nil {
+			if m.apod != nil && m.OpenURL == nil {
 				cmds = append(cmds, m.copyLink())
 			}
 		case key.Matches(msg, keyOpen):
@@ -1016,16 +1016,18 @@ func (m *Model) helpKeysWith(scroll bool) []key.Binding {
 		scroll.SetEnabled(m.explanationOnScreen())
 		keys = append(keys, scroll)
 	}
-	// copying says so in its own place, at its own width, so nothing else in
-	// the bar moves; opening is offered where there is a browser to open in
-	links := []key.Binding{keyCopy}
-	if m.copiedRecently {
-		links[0] = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", copiedDesc))
+	// the day's NASA page: opened where there is a browser to open it in,
+	// copied everywhere else. Copying says so in its own place, at its own
+	// width, so nothing else in the bar moves.
+	link := keyOpen
+	switch {
+	case m.OpenURL != nil:
+	case m.copiedRecently:
+		link = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", copiedDesc))
+	default:
+		link = keyCopy
 	}
-	if m.OpenURL != nil {
-		links = append(links, keyOpen)
-	}
-	return append(append(keys, links...), keyQuit) // q quit stays last
+	return append(keys, link, keyQuit) // q quit stays last
 }
 
 // copiedDesc is the copy item's word for a moment after copying, centred in

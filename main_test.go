@@ -284,8 +284,8 @@ func TestCopyFeedbackKeepsTheFooterStill(t *testing.T) {
 	}
 }
 
-// the footer offers the day's NASA page to copy everywhere and, where there is
-// a browser to open it in, to open
+// the footer offers the day's NASA page one way: opened where there is a
+// browser to open it in, copied everywhere else
 func TestFooterOffersTheNASAPage(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
 	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy nasa link") || strings.Contains(frame, "open nasa page") {
@@ -297,8 +297,12 @@ func TestFooterOffersTheNASAPage(t *testing.T) {
 
 	var opened string
 	m.OpenURL = func(url string) { opened = url }
-	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy nasa link") || !strings.Contains(frame, "o open nasa page") {
-		t.Error("in the browser the footer should offer both copying and opening")
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "o open nasa page") || strings.Contains(frame, "copy nasa link") {
+		t.Error("in the browser the footer should offer opening the page, and only that")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if m.copiedRecently {
+		t.Error("c copied in the browser, where the footer offers opening instead")
 	}
 	m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
 	if opened != m.apod.ArticleURL {
