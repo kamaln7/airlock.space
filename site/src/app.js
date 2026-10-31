@@ -1,6 +1,43 @@
 const status = document.getElementById('status');
 const restart = document.getElementById('restart');
-const loading = document.getElementById('loading');
+
+// The loader is the program's own first frame, drawn into the terminal before
+// the program is there to draw it: the same cell, glyphs and colours as
+// viewLoading in main.go, and the same clock - the moon's phase is wall time
+// in eighths of a second, and the program carries on the page's wait from
+// performance.timeOrigin - so the hand-over shows nothing at all.
+const SPINNER_DELAY_MS = 500; // spinnerDelay in main.go
+const SPINNER_STEP_MS = 125; // spinnerStep in main.go
+const MOON = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
+const LABEL = 'loading...';
+let stopLoader = () => {};
+
+function startLoader(term) {
+    let drawn = '';
+    const draw = () => {
+        if (performance.now() < SPINNER_DELAY_MS) return;
+        const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const moon = MOON[still ? 0 : Math.floor(Date.now() / SPINNER_STEP_MS) % MOON.length];
+        // lipgloss centring: the odd cell goes on the right
+        const row = Math.floor(term.rows / 2) + 1;
+        const col = Math.floor((term.cols - (2 + 1 + LABEL.length)) / 2) + 1;
+        const frame = `${row};${col};${moon}`;
+        if (frame === drawn) return;
+        // the alternate screen, as the program uses: it leaves the normal
+        // screen clean for the goodbye
+        const clear = drawn.startsWith(`${row};${col};`) ? '' : '\x1b[?1049h\x1b[?25l\x1b[2J';
+        drawn = frame;
+        term.write(`${clear}\x1b[${row};${col}H\x1b[38;5;220m${moon}\x1b[m \x1b[38;2;92;92;92m${LABEL}\x1b[m`);
+    };
+    draw();
+    const timer = setInterval(draw, 25);
+    stopLoader = (clear = false) => {
+        clearInterval(timer);
+        if (clear && drawn) term.write('\x1b[2J');
+        stopLoader = () => {};
+    };
+}
+
 restart.addEventListener('click', () => location.reload());
 
 const copySsh = document.getElementById('copy-ssh');
@@ -65,7 +102,6 @@ document.addEventListener('keydown', (event) => {
 }, { capture: true });
 
 function setStatus(message, state = '') {
-    loading.hidden = true;
     status.textContent = message;
     status.dataset.state = state;
     restart.hidden = state === '';
@@ -96,20 +132,21 @@ async function start() {
 
     const go = new Go();
 
-    const response = await fetch(new URL('../.generated/app.wasm', import.meta.url));
-    if (!response.ok) {
-        throw new Error(`app.wasm: HTTP ${response.status} ${response.statusText}`);
-    }
-
+    // The terminal comes up while the program downloads, so the loader can be
+    // drawn in it: the download is the long wait on a first visit.
     booba = new BoobaTerminal('terminal-container', {
         ...appearance,
         cursorVisible: false,
         disableSelection: true,
     });
-    const [{ instance }] = await Promise.all([
-        WebAssembly.instantiateStreaming(response, go.importObject),
-        loadFonts().then(() => booba.init()),
-    ]);
+    const terminal = loadFonts().then(() => booba.init()).then(() => startLoader(booba));
+    const program = fetch(new URL('../.generated/app.wasm', import.meta.url)).then((response) => {
+        if (!response.ok) {
+            throw new Error(`app.wasm: HTTP ${response.status} ${response.statusText}`);
+        }
+        return WebAssembly.instantiateStreaming(response, go.importObject);
+    });
+    const [{ instance }] = await Promise.all([program, terminal]);
 
     // Go consumes these: it reads the size from the terminal and renders
     // through airlockWrite, so clipboard sequences are scanned here.
@@ -120,7 +157,10 @@ async function start() {
         booba.write(data);
     };
 
-    // Go's main runs synchronously up to its first yield; connect before awaiting.
+    // Go's main runs synchronously up to its first yield; connect before
+    // awaiting. The loader stops without clearing: the program's first frame
+    // replaces it, carrying on the same wait and the same moon.
+    stopLoader();
     const exited = go.run(instance);
     booba.connectWasm();
     booba.focus();
@@ -137,6 +177,7 @@ async function start() {
 
 start().catch((err) => {
     console.error(err);
+    stopLoader(true);
     booba?.disconnect();
     setStatus(err instanceof Error ? err.message : String(err), 'error');
 });

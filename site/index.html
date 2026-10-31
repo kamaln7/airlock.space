@@ -196,41 +196,6 @@
             :root { --terminal-fontSize: 11px; }
             body { padding-top: 12px; }
         }
-        #loading {
-            position: absolute;
-            inset: 0;
-            z-index: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 1ch;
-            pointer-events: none;
-            visibility: hidden;
-            animation: show-loading 0s 500ms forwards;
-        }
-
-        #loading[hidden] { display: none; }
-        .loading-label { opacity: 0.6; }
-        .loading-moon { width: 2ch; color: var(--terminal-brightYellow); }
-        .loading-moon::before {
-            content: "🌑";
-            /* Match main.go's eight moon phases at one frame per 125ms. */
-            animation: moon-phase 1s steps(1, end) 500ms infinite;
-        }
-        @keyframes moon-phase {
-            0%, 100% { content: "🌑"; }
-            12.5% { content: "🌒"; }
-            25% { content: "🌓"; }
-            37.5% { content: "🌔"; }
-            50% { content: "🌕"; }
-            62.5% { content: "🌖"; }
-            75% { content: "🌗"; }
-            87.5% { content: "🌘"; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            .loading-moon::before { animation: none; }
-        }
-        @keyframes show-loading { to { visibility: visible; } }
     </style>
 </head>
 <body>
@@ -246,7 +211,6 @@
     </header>
     <div id="terminal-frame">
         <div id="terminal-container"></div>
-        <div id="loading" role="status"><span class="loading-moon" aria-hidden="true"></span><span class="loading-label">loading...</span></div>
     </div>
     <script type="module" src="src/app.js"></script>
 </body>

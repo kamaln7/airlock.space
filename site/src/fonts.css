@@ -1,10 +1,13 @@
-/* Declare faces before first paint; the terminal waits for these same CSS faces. */
+/* Declare faces before first paint; the terminal waits for these same CSS faces.
+   Airlock Mono is the fallback for what Departure Mono lacks, and draws one moon
+   phase (U+1F315) as an outline: leave that to the emoji font like the rest. */
 @font-face {
     font-family: "Airlock Mono";
     src: url("fonts/AirlockMono-Light.woff2") format("woff2");
     font-weight: 400;
     font-style: normal;
     font-display: block;
+    unicode-range: U+0-1F314, U+1F316-10FFFF;
     font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
 }
 
@@ -14,6 +17,7 @@
     font-weight: 400;
     font-style: italic;
     font-display: block;
+    unicode-range: U+0-1F314, U+1F316-10FFFF;
     font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
 }
 
@@ -23,6 +27,7 @@
     font-weight: 700;
     font-style: normal;
     font-display: block;
+    unicode-range: U+0-1F314, U+1F316-10FFFF;
     font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
 }
 
@@ -32,6 +37,7 @@
     font-weight: 700;
     font-style: italic;
     font-display: block;
+    unicode-range: U+0-1F314, U+1F316-10FFFF;
     font-feature-settings: "calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "liga", "cv10", "cv31", "cv32", "cv62";
 }
 

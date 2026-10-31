@@ -156,6 +156,11 @@ type Model struct {
 	// window. Locally the photo costs nothing, so it is the default and the
 	// reader's choice of photo or art holds from day to day.
 	Remote bool
+	// WaitingSince is when the reader started waiting, when that was before
+	// the program started: the browser's page load. The first load's spinner
+	// delay carries on from there rather than starting over, so the page's own
+	// loader hands over without a gap.
+	WaitingSince time.Time
 
 	// Profile and isLight come from the terminal via bubbletea, not from the
 	// server's own environment. Stated the light way round so the zero value
@@ -200,6 +205,7 @@ type Model struct {
 	sentW, sentH   int       // the pixel box the photo on screen was encoded for
 	resizeGen      int       // which resize the pending settle belongs to
 	dayWait        spinDelay // the page waiting on a day
+	firstWait      bool      // that wait is for the first day, with none on screen
 	boxWait        spinDelay // the picture's box waiting on something to draw
 	photoWait      spinDelay // the photo on its way to the terminal
 	photoSince     time.Time // when the photo started on its way
@@ -210,7 +216,6 @@ type Model struct {
 	artPending     string     // the art being rendered
 	artFailed      string     // art that could not be rendered, not to be tried again
 	lastArtFor     *apod.APOD // the day lastArt was drawn for
-	spinFrame      int
 }
 
 type State int
@@ -222,8 +227,12 @@ const (
 )
 
 // the moon-phase spinner is advanced by a single plain tick chain started in
-// Init; no start/stop bookkeeping means no way for the chain to die
+// Init; no start/stop bookkeeping means no way for the chain to die. Its phase
+// is wall time in eighths of a second, not a count of ticks, so every spinner
+// - and the browser page's, drawn before the program runs - is in step.
 var spinnerFrames = []string{"🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"}
+
+const spinnerStep = time.Second / 8
 
 type msgSpin struct{}
 
@@ -270,19 +279,24 @@ func ClampSize(w, h int) (int, int) {
 	return min(w, maxCols), min(h, maxRows)
 }
 
+// spinTick fires on the next phase boundary, so each frame shows a full step.
 func spinTick() tea.Cmd {
-	return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return msgSpin{} })
+	return tea.Tick(spinnerStep-time.Duration(time.Now().UnixNano())%spinnerStep, func(time.Time) tea.Msg { return msgSpin{} })
 }
 
 func (m *Model) spinnerView() string {
-	return m.txtYellow().Render(spinnerFrames[m.spinFrame%len(spinnerFrames)])
+	phase := time.Now().UnixMilli() / spinnerStep.Milliseconds()
+	return m.txtYellow().Render(spinnerFrames[phase%int64(len(spinnerFrames))])
 }
 
 func (m *Model) Init() tea.Cmd {
 	// New, not the zero value: a zero viewport sets itself up on its first
 	// Update, and that setup replaces explKeyMap with the stock keys
 	m.vp = viewport.New()
-	m.dayWait = spinDelay{since: time.Now()}
+	m.dayWait, m.firstWait = spinDelay{since: time.Now()}, true
+	if !m.WaitingSince.IsZero() {
+		m.dayWait.since = m.WaitingSince
+	}
 	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor, requestCellSize)
 }
 
@@ -463,7 +477,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgSpin:
 		// when the spinner isn't visible the frame is unchanged and bubbletea
 		// skips the flush, so the perpetual tick is free
-		m.spinFrame++
 		cmds = append(cmds, spinTick())
 	case msgCopyExpired:
 		m.copiedRecently = false
@@ -533,7 +546,7 @@ func (m *Model) showDay(date time.Time) tea.Cmd {
 	}
 	m.date = date
 	m.State = StateLoading
-	m.dayWait = spinDelay{since: time.Now()}
+	m.dayWait, m.firstWait = spinDelay{since: time.Now()}, false
 	return m.loadAPOD(date)
 }
 
@@ -772,8 +785,16 @@ func (m *Model) baseView() string {
 			// content for a spinner once the wait is worth mentioning
 			return m.viewAPOD()
 		}
-		return m.viewLoading()
+		return m.viewLoading(m.dayWait.show(true))
 	case StateAPOD:
+		// the first day's spinner, once up, stays where it is for its minimum
+		// rather than jumping into the page's layout for the rest of it
+		if m.firstWait {
+			if m.dayWait.show(false) {
+				return m.viewLoading(true)
+			}
+			m.firstWait = false
+		}
 		return m.viewAPOD()
 	case StateFullscreen:
 		return m.viewFullscreen()
@@ -1446,8 +1467,8 @@ func (m *Model) loadingLine() string {
 }
 
 // viewLoading is the first load, before there is a day to keep on screen.
-func (m *Model) viewLoading() string {
-	if !m.dayWait.show(true) {
+func (m *Model) viewLoading(spinner bool) string {
+	if !spinner {
 		return txt.Width(m.Width).Height(m.Height).Render("")
 	}
 	// spinner pinned to the exact screen center so it doesn't jump when the

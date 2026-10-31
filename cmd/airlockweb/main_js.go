@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"syscall/js"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	booba "github.com/NimbleMarkets/go-booba"
@@ -30,6 +31,9 @@ func main() {
 	m := &airlockspace.Model{
 		Width: cols, Height: rows,
 		KittyGraphics: true, Session: out,
+		// the page has been waiting since it loaded, its loader up after the
+		// same delay: the program's first spinner carries that wait on
+		WaitingSince: time.UnixMilli(int64(js.Global().Get("performance").Get("timeOrigin").Float())),
 	}
 	if _, err := booba.NewProgram(m,
 		tea.WithOutput(out),

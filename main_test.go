@@ -1589,6 +1589,36 @@ func TestPictureBoxWaitIsOneWait(t *testing.T) {
 	}
 }
 
+// the first day's spinner, once up, holds its place for its minimum: it does
+// not jump into the page's layout, header and all, for the last of it
+func TestFirstSpinnerHoldsItsPlace(t *testing.T) {
+	m := &Model{Width: 100, Height: 40}
+	m.Init()
+	m.dayWait.since = time.Now().Add(-spinnerDelay)
+	// where the label sits, not the whole frame: the moon's phase is the clock's
+	at := func() string {
+		for i, l := range strings.Split(ansi.Strip(m.baseView()), "\n") {
+			if s, _, ok := columnSpan(l, "loading..."); ok {
+				return fmt.Sprintf("row %d col %d", i, s)
+			}
+		}
+		return "no spinner"
+	}
+	before := at()
+	if before == "no spinner" {
+		t.Fatal("no spinner for a slow first day")
+	}
+	first := &apod.APOD{Picture: apodclient.Picture{Title: "A Test Nebula", Date: day(2026, 8, 31)}, Explanation: "words"}
+	m.Update(apodMsg{apod: first})
+	if got := at(); got != before {
+		t.Errorf("the spinner moved when the first day landed: %s, was %s", got, before)
+	}
+	m.dayWait.shown = time.Now().Add(-spinnerMinShow)
+	if !strings.Contains(ansi.Strip(m.baseView()), "A Test Nebula") {
+		t.Error("the first day did not appear after the spinner's minimum")
+	}
+}
+
 // over ssh the photo is megabytes; asking for it on one day is not asking for
 // it on every day after
 func TestNewDayStartsFromTheDefaultOverSSH(t *testing.T) {
