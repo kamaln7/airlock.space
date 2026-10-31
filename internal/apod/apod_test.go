@@ -42,6 +42,46 @@ func TestVideoDayResolvesToNilBytes(t *testing.T) {
 	}
 }
 
+// the size is the layout's to know before the photo lands: it must be out as
+// soon as the header is in, not after the megabytes behind it
+func TestImageSizeIsKnownBeforeTheBodyArrives(t *testing.T) {
+	old := cacheDir
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = old }()
+
+	var buf bytes.Buffer
+	png.Encode(&buf, image.NewGray(image.Rect(0, 0, 40, 30)))
+	full := buf.Bytes()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(full[:33]) // signature and IHDR: the size, nothing more
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write(full[33:])
+	}))
+	defer srv.Close()
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	defer finish()
+
+	a := mustAPOD(t, &apodclient.Picture{ImageURL: srv.URL + "/apod.png"})
+	got := make(chan image.Point, 1)
+	go func() { got <- a.WaitImageSize() }()
+	select {
+	case sz := <-got:
+		if sz != (image.Point{X: 40, Y: 30}) {
+			t.Errorf("WaitImageSize() = %v; want 40x30", sz)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("size not reported until the whole image arrived")
+	}
+	finish()
+	if _, err := a.ImageBytes(); err != nil { // let the fetch finish before cleanup
+		t.Fatal(err)
+	}
+}
+
 func TestImageCacheSurvivesANewAPODInstance(t *testing.T) {
 	cacheDir = t.TempDir()
 	defer func() { cacheDir = imageCacheDir() }()

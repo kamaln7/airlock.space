@@ -198,6 +198,7 @@ type Model struct {
 	placedCols     int       // current kitty virtual placement size
 	placedRows     int
 	imageLoading   bool
+	imageSized     bool // the picture's size is known, though its bytes may not be
 	spinFrame      int
 }
 
@@ -415,13 +416,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kittyReady = false
 		m.sentW, m.sentH = 0, 0
 		m.imageLoading = true
+		m.imageSized = false
 		// a new day starts as art again: the photo is megabytes, and having
 		// asked for it on one picture is not asking for it on every one after
 		m.photoToggled = false
 		m.applyArtDefault()
 		m.placedCols, m.placedRows = 0, 0
 		m.State = StateAPOD
-		cmds = append(cmds, m.loadImage())
+		cmds = append(cmds, m.loadImage(), m.loadImageSize())
+	case imageSizeMsg:
+		if msg.apod == m.apod {
+			m.imageSized = msg.ok
+		}
 	case imageMsg:
 		m.imageOK = msg.ok
 		m.imageLoading = false
@@ -465,6 +471,13 @@ type apodMsg struct {
 
 type imageMsg struct {
 	ok bool
+}
+
+// imageSizeMsg reports that the picture's size is known, for the day it
+// belongs to: the download may finish after the reader has moved on.
+type imageSizeMsg struct {
+	apod *apod.APOD
+	ok   bool
 }
 
 // kittyMsg reports an upload finishing. It carries the day it belongs to: the
@@ -531,6 +544,15 @@ func (m *Model) loadImage() tea.Cmd {
 			return imageMsg{}
 		}
 		return imageMsg{ok: true}
+	}
+}
+
+// loadImageSize hears about the picture's size as soon as its header is in,
+// so the page can be laid out for it before the rest of the photo arrives.
+func (m *Model) loadImageSize() tea.Cmd {
+	a := m.apod
+	return func() tea.Msg {
+		return imageSizeMsg{apod: a, ok: a.WaitImageSize().X > 0}
 	}
 }
 
@@ -782,15 +804,16 @@ func (m *Model) viewAPOD() string {
 	// tall one is bound by the rows available and would otherwise sit in the
 	// middle of a column twice its width
 	hasImage := m.imageOK || m.imageLoading
-	imgW, imgH := room, bodyH // while loading, hold the column open so the
-	if m.imageOK {            // page does not jump when the picture arrives
+	sized := m.imageOK || m.imageSized
+	imgW, imgH := room, bodyH // until the size is known, hold the column open
+	if sized {
 		imgW, imgH = fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, room, bodyH, m.cellAspect())
 	}
 	// the gate is horizontal room only. A tall picture is bound by the rows,
 	// not the columns, so it fits to a narrow strip - and stacking it would
 	// hand it half the rows and make it smaller still. Only a wide one, which
 	// wants the width the text wants, is better off above the text.
-	beside := hasImage && room >= imageMinWidth && !(m.imageOK && m.imageIsWide())
+	beside := hasImage && room >= imageMinWidth && !(sized && m.imageIsWide())
 
 	contentW := textW
 	switch {

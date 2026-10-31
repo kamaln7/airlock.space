@@ -1624,3 +1624,29 @@ func TestTitleHoldsItsColumnWhilePictureLoads(t *testing.T) {
 		}
 	}
 }
+
+// the photo's size arrives with the first kilobytes of its download, long
+// before the rest: once it is known the page takes the shape it will have,
+// so the explanation does not jump when the picture itself lands
+func TestExplanationHoldsItsPlaceOnceThePictureSizeIsKnown(t *testing.T) {
+	explAt := func(m *Model) (row, col int) {
+		t.Helper()
+		for i, l := range strings.Split(m.baseView(), "\n") {
+			if s, _, ok := columnSpan(ansi.Strip(l), "Some words"); ok {
+				return i, s
+			}
+		}
+		t.Fatal("no explanation row")
+		return -1, -1
+	}
+	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}} {
+		m := besideImage(t, 151, 40)
+		m.apod.ImageSize = sz
+		m.imageLoading, m.imageSized, m.imageOK = true, true, false
+		loadingRow, loadingCol := explAt(m)
+		m.imageLoading, m.imageOK = false, true
+		if row, col := explAt(m); row != loadingRow || col != loadingCol {
+			t.Errorf("picture %v: explanation at %d,%d; was %d,%d while loading", sz, row, col, loadingRow, loadingCol)
+		}
+	}
+}

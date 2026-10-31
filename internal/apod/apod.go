@@ -50,8 +50,11 @@ type APOD struct {
 	// Decode on demand and discard: a decoded APOD is tens of MB, the box has 512.
 	ImageBytes resolvable.V[[]byte]
 
-	// ImageSize is set once ImageBytes has resolved.
+	// ImageSize is the picture's size in pixels. It is known from the first
+	// few kilobytes of the download; WaitImageSize says when.
 	ImageSize image.Point
+	sized     chan struct{} // closed once ImageSize is set
+	sizeOnce  sync.Once
 }
 
 // First is the day APOD began; there is nothing to browse before it.
@@ -191,7 +194,7 @@ func newAPOD(entry *apodclient.Picture) (*APOD, error) {
 	if err != nil {
 		return nil, fmt.Errorf("converting explanation: %w", err)
 	}
-	a := &APOD{Picture: *entry, Explanation: dropExplanationLabel(explanation)}
+	a := &APOD{Picture: *entry, Explanation: dropExplanationLabel(explanation), sized: make(chan struct{})}
 	a.ImageBytes = resolvable.New(a.getImageBytes,
 		resolvable.Retry(3, nil),
 		resolvable.CacheForever(),
@@ -323,7 +326,7 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 			return nil, nil
 		}
 		if body, err := os.ReadFile(cacheFile(a.Date.Format(time.DateOnly), "img")); err == nil && rec.ImageSize != (image.Point{}) {
-			a.ImageSize = rec.ImageSize
+			a.setSize(rec.ImageSize)
 			return body, nil
 		}
 	}
@@ -333,7 +336,7 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 		return nil, nil
 	}
 
-	body, err := fetchImage(ctx, a.ImageURL)
+	body, err := fetchImage(ctx, a.ImageURL, a.setSize)
 	if errors.Is(err, errNotAnImage) {
 		a.store(nil)
 		return nil, nil
@@ -341,11 +344,9 @@ func (a *APOD) getImageBytes(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("decoding image config: %w", err)
+	if a.ImageSize == (image.Point{}) {
+		return nil, errors.New("decoding image config: unrecognised image header")
 	}
-	a.ImageSize = image.Point{X: cfg.Width, Y: cfg.Height}
 	a.store(body)
 	return body, nil
 }
@@ -363,7 +364,10 @@ func newImageClient() *http.Client {
 	return &http.Client{Transport: t}
 }
 
-func fetchImage(ctx context.Context, url string) ([]byte, error) {
+// fetchImage downloads an image, calling onSize with its dimensions as soon as
+// the header has arrived, so a layout can be fitted to it while the rest of
+// the bytes are still on their way.
+func fetchImage(ctx context.Context, url string, onSize func(image.Point)) ([]byte, error) {
 	select {
 	case imageSlots <- struct{}{}:
 		defer func() { <-imageSlots }()
@@ -394,14 +398,47 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: content-type %q", errNotAnImage, ct)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+	// DecodeConfig reads only as far as the dimensions; the tee keeps those
+	// bytes for the body. A failure here is a header this decoder does not
+	// recognise, or a read error the rest of the copy will report.
+	var body bytes.Buffer
+	if cfg, _, err := image.DecodeConfig(io.TeeReader(resp.Body, &body)); err == nil {
+		onSize(image.Point{X: cfg.Width, Y: cfg.Height})
+	}
+	if _, err := body.ReadFrom(resp.Body); err != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
 		return nil, fmt.Errorf("reading image body: %w", err)
 	}
-	return body, nil
+	return body.Bytes(), nil
+}
+
+// setSize records the picture's size once; a retried download is the same
+// picture, and readers rely on the value not moving after sized is closed.
+func (a *APOD) setSize(p image.Point) {
+	a.sizeOnce.Do(func() {
+		a.ImageSize = p
+		if a.sized != nil {
+			close(a.sized)
+		}
+	})
+}
+
+// WaitImageSize blocks until the picture's size is known, which is usually
+// long before ImageBytes resolves, and returns it. It returns the zero size
+// when the day turns out to have no image or the download fails.
+func (a *APOD) WaitImageSize() image.Point {
+	done := make(chan struct{})
+	go func() {
+		a.ImageBytes() // coalesces with the caller already fetching it
+		close(done)
+	}()
+	select {
+	case <-a.sized:
+	case <-done:
+	}
+	return a.ImageSize
 }
 
 // Decode decodes the compressed image. The result is intentionally not cached;
