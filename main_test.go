@@ -8,7 +8,9 @@ import (
 	"image/png"
 	"io"
 	"maps"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1206,7 +1208,7 @@ func artLogReset() {
 // them; each piece has to be a complete, correctly keyed escape
 func TestKittyChunksAreWellFormed(t *testing.T) {
 	png := make([]byte, 20000) // enough for several chunks
-	chunks := kittyChunks(png)
+	chunks := kittyChunks(7, png)
 	if len(chunks) < 3 {
 		t.Fatalf("got %d chunks, want several", len(chunks))
 	}
@@ -1215,7 +1217,7 @@ func TestKittyChunksAreWellFormed(t *testing.T) {
 			t.Errorf("chunk %d is not a complete escape: %q", i, c[:min(30, len(c))])
 		}
 	}
-	if !strings.HasPrefix(chunks[0], "\x1b_Ga=t,f=100,i=42,q=2,m=1;") {
+	if !strings.HasPrefix(chunks[0], "\x1b_Ga=t,f=100,i=7,q=2,m=1;") {
 		t.Errorf("first chunk does not open the transmission: %q", chunks[0][:40])
 	}
 	for i, c := range chunks[1 : len(chunks)-1] {
@@ -1324,7 +1326,7 @@ func TestFullscreenOnlyResendsWhenItIsWorthIt(t *testing.T) {
 		t.Fatal("no first send")
 	}
 	was := ordinary.sentW
-	ordinary.kittyReady = true
+	landed(ordinary)
 
 	ordinary.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if ordinary.State != StateFullscreen {
@@ -1343,7 +1345,7 @@ func TestFullscreenOnlyResendsWhenItIsWorthIt(t *testing.T) {
 		t.Fatal("no first send on the small terminal")
 	}
 	wasSmall := small.sentW
-	small.kittyReady = true
+	landed(small)
 
 	small.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if gain := float64(small.sentW) / float64(wasSmall); gain < resendGain {
@@ -1353,10 +1355,145 @@ func TestFullscreenOnlyResendsWhenItIsWorthIt(t *testing.T) {
 
 	// and coming back never sends a smaller one
 	back := small.sentW
-	small.kittyReady = true
+	landed(small)
 	small.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if small.sentW != back {
 		t.Errorf("leaving fullscreen sent a smaller photo: %d -> %d", back, small.sentW)
+	}
+}
+
+// landed lands the upload in flight, as its command would.
+func landed(m *Model) {
+	m.Update(kittyMsg{apod: m.apod, id: m.kittyNext, ok: true})
+}
+
+// kittyTerm keeps the terminal's side of the graphics protocol, as far as the
+// spec says: re-sending data under an id deletes that image and every
+// placement of it, and no other graphics command may come between the chunks
+// of one transmission.
+type kittyTerm struct {
+	images    map[uint32]bool // complete images
+	placed    map[uint32]bool
+	receiving uint32
+	errs      []string
+}
+
+var kittyCmd = regexp.MustCompile(`\x1b_G([^;\x1b]*)(?:;[^\x1b]*)?\x1b\\`)
+
+func (k *kittyTerm) feed(stream string) {
+	for _, m := range kittyCmd.FindAllStringSubmatch(stream, -1) {
+		keys := map[string]string{}
+		for _, kv := range strings.Split(m[1], ",") {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				keys[k] = v
+			}
+		}
+		id64, _ := strconv.ParseUint(keys["i"], 10, 32)
+		id := uint32(id64)
+		if keys["a"] == "" && k.receiving != 0 { // a continuation chunk
+			if keys["m"] == "0" {
+				k.images[k.receiving], k.receiving = true, 0
+			}
+			continue
+		}
+		if k.receiving != 0 {
+			k.errs = append(k.errs, fmt.Sprintf("a=%s i=%d arrived among image %d's chunks", keys["a"], id, k.receiving))
+		}
+		switch keys["a"] {
+		case "t":
+			delete(k.images, id)
+			delete(k.placed, id) // the spec: the old image and all its placements go
+			if keys["m"] == "1" {
+				k.receiving = id
+			} else {
+				k.images[id] = true
+			}
+		case "p":
+			if !k.images[id] {
+				k.errs = append(k.errs, fmt.Sprintf("placement of image %d, which the terminal does not hold", id))
+			}
+			k.placed[id] = true
+		case "d":
+			delete(k.images, id)
+			delete(k.placed, id)
+		}
+	}
+}
+
+// placeholderID reads the image id the frame's placeholder cells point at.
+func placeholderID(t *testing.T, frame string) uint32 {
+	t.Helper()
+	m := regexp.MustCompile("\x1b\\[38;2;(\\d+);(\\d+);(\\d+)m\U0010EEEE").FindStringSubmatch(frame)
+	if m == nil {
+		t.Fatal("no photo placeholders in the frame")
+	}
+	r, _ := strconv.Atoi(m[1])
+	g, _ := strconv.Atoi(m[2])
+	b, _ := strconv.Atoi(m[3])
+	return uint32(r<<16 | g<<8 | b)
+}
+
+// flipping days faster than photos upload: the upload for a day the reader
+// has already left lands after the day on screen has its photo placed. It used
+// to go up under the same id, which deleted that placement and left the cells
+// pointing at nothing.
+func TestLateUploadCannotWipeThePhotoOnScreen(t *testing.T) {
+	var out strings.Builder
+	m := besideImage(t, 130, 34)
+	m.Session, m.preferArt, m.photoToggled, m.kittyReady = &out, false, true, false
+	dayA := m.apod
+
+	pending := []tea.Cmd{m.sendKitty()} // day A's photo goes up
+	if pending[0] == nil {
+		t.Fatal("day A's photo did not go up")
+	}
+
+	// and before it lands, the reader is on day B, whose bytes are in
+	dayB := &apod.APOD{Picture: apodclient.Picture{Title: "Another Day", Date: day(2026, 8, 19),
+		ImageSize: dayA.ImageSize}, Explanation: "more words"}
+	dayB.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
+	m.date = dayB.Date
+	m.Update(apodMsg{date: dayB.Date, apod: dayB, hasImage: true})
+	m.imageOK = true
+	if up := m.sendKitty(); up != nil {
+		pending = append(pending, up)
+	}
+
+	// land uploads newest first - the order that wiped the photo - and every
+	// upload a landing starts in turn
+	var collect func(tea.Cmd)
+	collect = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		switch msg := cmd().(type) {
+		case tea.BatchMsg:
+			for _, c := range msg {
+				collect(c)
+			}
+		case kittyMsg:
+			pending = append(pending, func() tea.Msg { return msg })
+		}
+	}
+	for len(pending) > 0 {
+		up := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		_, cmd := m.Update(up())
+		collect(cmd)
+		m.baseView()
+	}
+
+	term := &kittyTerm{images: map[uint32]bool{}, placed: map[uint32]bool{}}
+	term.feed(out.String())
+	for _, e := range term.errs {
+		t.Error(e)
+	}
+	id := placeholderID(t, m.baseView())
+	if !term.images[id] || !term.placed[id] {
+		t.Errorf("the photo on screen points at image %d, which the terminal holds=%v placed=%v", id, term.images[id], term.placed[id])
+	}
+	if len(term.images) != 1 {
+		t.Errorf("the terminal holds %d images; only day B's is still wanted", len(term.images))
 	}
 }
 
@@ -1724,7 +1861,7 @@ func TestPhotoIsOnlySentWhenItWillBeSeen(t *testing.T) {
 	if cmd := m.sendKitty(); cmd == nil {
 		t.Error("did not upload the photo when the photo is what is shown")
 	}
-	m.kittyReady = true
+	landed(m)
 	if cmd := m.sendKitty(); cmd != nil {
 		t.Error("uploaded the same photo twice")
 	}

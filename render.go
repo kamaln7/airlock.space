@@ -171,19 +171,24 @@ func kittyPNG(img image.Image, maxW, maxH int) ([]byte, error) {
 const maxPhotoPixels = 2 << 20 // ~2 megapixels
 
 // kitty graphics protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/
-const kittyImageID = 42
+//
+// Each upload gets an image id of its own. Sending data again under an id the
+// terminal already holds deletes that image and every placement of it, so a
+// shared id let a late upload - a day the reader had already left - wipe out
+// the placement of the photo on screen. Ids ride in the placeholder cells'
+// 24-bit foreground colour, so they stay within 24 bits and never 0.
+const kittyMaxID = 1<<24 - 1
 
 // kittyChunks splits PNG data into the escape-wrapped pieces that upload it
-// under kittyImageID without displaying it. Returned as pieces rather than one
+// as image id without displaying it. Returned as pieces rather than one
 // string so the caller can write them one at a time and let a frame out
 // between: a megabyte written in a single call holds the connection for
 // seconds, and nothing else can reach the terminal while it does.
 //
 // The protocol's rule is that no other *graphics* escape may arrive between
-// the chunks of one image. Nothing emits one while an upload is in flight -
-// the placement is only written once the upload has landed, and until then the
-// view is drawing sextant art.
-func kittyChunks(pngData []byte) []string {
+// the chunks of one image, so one upload is in flight at a time (see
+// sendKitty) and placements and deletes are only written between uploads.
+func kittyChunks(id uint32, pngData []byte) []string {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 	var chunks []string
 	first := true
@@ -195,7 +200,7 @@ func kittyChunks(pngData []byte) []string {
 		b64 = b64[len(chunk):]
 		ctrl := fmt.Sprintf("m=%d", boolToInt(len(b64) > 0))
 		if first {
-			ctrl = fmt.Sprintf("a=t,f=100,i=%d,q=2,", kittyImageID) + ctrl
+			ctrl = fmt.Sprintf("a=t,f=100,i=%d,q=2,", id) + ctrl
 			first = false
 		}
 		chunks = append(chunks, "\x1b_G"+ctrl+";"+chunk+"\x1b\\")
@@ -204,11 +209,15 @@ func kittyChunks(pngData []byte) []string {
 }
 
 // kittyVirtualPlacement creates or replaces the virtual placement that maps
-// the image onto a cols x rows grid. It draws nothing by itself — cells appear
-// wherever kittyPlaceholders text is printed — so it is safe to write to the
-// session at any time.
-func kittyVirtualPlacement(cols, rows int) string {
-	return fmt.Sprintf("\x1b_Ga=p,U=1,i=%d,p=1,c=%d,r=%d,q=2\x1b\\", kittyImageID, cols, rows)
+// image id onto a cols x rows grid. It draws nothing by itself — cells appear
+// wherever kittyPlaceholders text is printed.
+func kittyVirtualPlacement(id uint32, cols, rows int) string {
+	return fmt.Sprintf("\x1b_Ga=p,U=1,i=%d,p=1,c=%d,r=%d,q=2\x1b\\", id, cols, rows)
+}
+
+// kittyDelete frees image id and its placements in the terminal.
+func kittyDelete(id uint32) string {
+	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", id)
 }
 
 // kittyPlaceholders returns a cols x rows block of unicode placeholder cells
@@ -220,7 +229,7 @@ func kittyVirtualPlacement(cols, rows int) string {
 // The id survives only at a truecolor profile: the v2 renderer converts colors
 // on the way out, and a downsampled foreground is a different image id. That
 // holds because the only terminals we enable graphics for are truecolor ones.
-func kittyPlaceholders(cols, rows int) string {
+func kittyPlaceholders(id uint32, cols, rows int) string {
 	cols = min(cols, len(kittyDiacritics))
 	rows = min(rows, len(kittyDiacritics))
 	var s strings.Builder
@@ -228,7 +237,7 @@ func kittyPlaceholders(cols, rows int) string {
 		if r > 0 {
 			s.WriteByte('\n')
 		}
-		fmt.Fprintf(&s, "\x1b[38;2;0;0;%dm", kittyImageID)
+		fmt.Fprintf(&s, "\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
 		for c := 0; c < cols; c++ {
 			s.WriteRune(0x10EEEE)
 			s.WriteRune(kittyDiacritics[r])

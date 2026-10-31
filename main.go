@@ -183,6 +183,11 @@ type Model struct {
 	latest         time.Time // the most recent day NASA has posted
 	imageOK        bool      // image bytes are ready to render
 	kittyReady     bool      // this day's photo is uploaded and placeable
+	kittyID        uint32    // the terminal's image of this day's photo, once uploaded
+	kittyNext      uint32    // the id the last upload took
+	kittyBusy      bool      // an upload is in flight; only one ever is
+	kittyWanted    bool      // an upload was asked for while another was in flight
+	kittyDrops     []uint32  // images the terminal no longer needs, freed between uploads
 	preferArt      bool      // sextant art instead of the real photo
 	photoToggled   bool      // user overrode the art/photo default with the keybind
 	copiedRecently bool
@@ -211,7 +216,7 @@ type Model struct {
 	firstWait      bool      // that wait is for the first day, with none on screen
 	boxWait        spinDelay // the picture's box waiting on something to draw
 	photoWait      spinDelay // the photo on its way to the terminal
-	photoSince     time.Time // when the photo started on its way
+	photoSince     time.Time // when this day's photo started on its way
 	placedCols     int       // current kitty virtual placement size
 	placedRows     int
 	hasImage       bool       // the day has a picture of known size: its box is laid out
@@ -445,6 +450,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boxWait = spinDelay{} // a new day's box starts its own wait
 		m.hasImage = msg.hasImage
 		m.kittyReady = false
+		m.kittyDrop(m.kittyID) // the photo of the day being left
+		m.kittyID = 0
+		m.photoSince = time.Time{}
 		m.sentW, m.sentH = 0, 0
 		// over ssh a new day starts from the default again: the photo is
 		// megabytes, and having asked for it on one picture is not asking
@@ -466,10 +474,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyArtDefault()
 		cmds = append(cmds, m.sendKitty())
 	case kittyMsg:
-		m.photoSince = time.Time{}
-		if msg.apod == m.apod {
-			m.kittyReady = msg.ok
+		m.kittyBusy = false
+		switch {
+		case msg.apod != m.apod:
+			// a day the reader has already left: its image is not wanted
+			m.kittyDrop(msg.id)
+		case msg.ok:
+			m.kittyDrop(m.kittyID) // a smaller cut of this day, now superseded
+			m.kittyID, m.kittyReady = msg.id, true
 			m.placedCols, m.placedRows = 0, 0
+			m.photoSince = time.Time{}
+		default:
+			m.kittyReady = false
+			m.photoSince = time.Time{}
+		}
+		m.flushKittyDrops()
+		if m.kittyWanted {
+			m.kittyWanted = false
+			cmds = append(cmds, m.sendKitty())
 		}
 	case tea.ColorProfileMsg:
 		m.Profile = msg.Profile
@@ -518,10 +540,12 @@ type imageMsg struct {
 	ok   bool
 }
 
-// kittyMsg reports an upload finishing. It carries the day it belongs to: the
-// reader may have moved on while megabytes were in flight.
+// kittyMsg reports an upload finishing. It carries the day it belongs to - the
+// reader may have moved on while megabytes were in flight - and the image id
+// it went up as.
 type kittyMsg struct {
 	apod *apod.APOD
+	id   uint32
 	ok   bool
 }
 
@@ -688,22 +712,32 @@ func (m *Model) sendKitty() tea.Cmd {
 	if m.kittyReady && (m.sentW == 0 || float64(w) < float64(m.sentW)*resendGain) {
 		return nil // one is already up there, and this would not better it
 	}
-	a, out := m.apod, m.Session
+	if m.photoSince.IsZero() {
+		m.photoSince = time.Now()
+		m.photoWait = spinDelay{since: m.photoSince}
+	}
+	// one upload at a time: two in flight would interleave their chunks,
+	// which the protocol forbids. This one goes when the one in flight lands.
+	if m.kittyBusy {
+		m.kittyWanted = true
+		return nil
+	}
+	m.kittyNext = m.kittyNext%kittyMaxID + 1
+	a, out, id := m.apod, m.Session, m.kittyNext
+	m.kittyBusy = true
 	m.sentW, m.sentH = w, h
-	m.photoSince = time.Now()
-	m.photoWait = spinDelay{since: m.photoSince}
 	return func() tea.Msg {
 		img, err := a.Decode()
 		if err != nil {
 			slog.Warn("failed to decode image for kitty", "error", err)
-			return kittyMsg{apod: a}
+			return kittyMsg{apod: a, id: id}
 		}
 		png, err := kittyPNG(img, maxW, maxH)
 		if err != nil {
 			slog.Warn("failed to prepare png for kitty", "error", err)
-			return kittyMsg{apod: a}
+			return kittyMsg{apod: a, id: id}
 		}
-		chunks := kittyChunks(png)
+		chunks := kittyChunks(id, png)
 		total := 0
 		for _, c := range chunks {
 			total += len(c)
@@ -714,12 +748,32 @@ func (m *Model) sendKitty() tea.Cmd {
 		for _, c := range chunks {
 			if _, err := io.WriteString(out, c); err != nil {
 				slog.Warn("failed to send image to the terminal", "error", err)
-				return kittyMsg{apod: a}
+				return kittyMsg{apod: a, id: id}
 			}
 		}
 		slog.Info("sent photo", "date", a.Date, "box", fmt.Sprintf("%dx%d", maxW, maxH), "bytes", total)
-		return kittyMsg{apod: a, ok: true}
+		return kittyMsg{apod: a, id: id, ok: true}
 	}
+}
+
+// kittyDrop marks an image the terminal no longer needs. It is freed as soon
+// as no upload is in flight: a delete is a graphics command too, and must not
+// land between another image's chunks.
+func (m *Model) kittyDrop(id uint32) {
+	if id != 0 {
+		m.kittyDrops = append(m.kittyDrops, id)
+	}
+	m.flushKittyDrops()
+}
+
+func (m *Model) flushKittyDrops() {
+	if m.kittyBusy || m.Session == nil {
+		return
+	}
+	for _, id := range m.kittyDrops {
+		io.WriteString(m.Session, kittyDelete(id))
+	}
+	m.kittyDrops = m.kittyDrops[:0]
 }
 
 var (
@@ -1623,12 +1677,15 @@ func (m *Model) imageArea(cols, rows int) (cells string, waiting bool) {
 
 	if m.kittyReady && !m.preferArt {
 		c, r = min(c, len(kittyDiacritics)), min(r, len(kittyDiacritics))
-		if m.placedCols != c || m.placedRows != r {
-			// virtual placements draw nothing; safe to write outside the renderer
-			io.WriteString(m.Session, kittyVirtualPlacement(c, r))
+		// virtual placements draw nothing, so are safe outside the renderer -
+		// but only between uploads, never among another image's chunks. One
+		// that has to wait is placed when the upload in flight lands, which
+		// clears placedCols.
+		if (m.placedCols != c || m.placedRows != r) && !m.kittyBusy {
+			io.WriteString(m.Session, kittyVirtualPlacement(m.kittyID, c, r))
 			m.placedCols, m.placedRows = c, r
 		}
-		return kittyPlaceholders(c, r), false
+		return kittyPlaceholders(m.kittyID, c, r), false
 	}
 
 	date, mode := m.apod.Date.Format(time.DateOnly), canvasMode(m.Profile)
