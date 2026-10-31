@@ -1,6 +1,7 @@
 package airlockspace
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"io"
@@ -150,6 +151,11 @@ type Model struct {
 	// does not send it.
 	WidthPixels  int
 	HeightPixels int
+	// Remote is set when the client is at the far end of a network link, so
+	// the photo is megabytes down the wire: each day starts as art on a big
+	// window. Locally the photo costs nothing, so it is the default and the
+	// reader's choice of photo or art holds from day to day.
+	Remote bool
 
 	// Profile and isLight come from the terminal via bubbletea, not from the
 	// server's own environment. Stated the light way round so the zero value
@@ -197,8 +203,12 @@ type Model struct {
 	photoSince     time.Time // when the photo started on its way
 	placedCols     int       // current kitty virtual placement size
 	placedRows     int
-	imageLoading   bool
-	imageSized     bool // the picture's size is known, though its bytes may not be
+	hasImage       bool       // the day has a picture of known size: its box is laid out
+	artWant        artJob     // the art the last frame wanted and did not have
+	artPending     string     // the art being rendered
+	artFailed      string     // art that could not be rendered, not to be tried again
+	artSince       time.Time  // when the frame started waiting for art
+	lastArtFor     *apod.APOD // the day lastArt was drawn for
 	spinFrame      int
 }
 
@@ -268,6 +278,9 @@ func (m *Model) spinnerView() string {
 }
 
 func (m *Model) Init() tea.Cmd {
+	// New, not the zero value: a zero viewport sets itself up on its first
+	// Update, and that setup replaces explKeyMap with the stock keys
+	m.vp = viewport.New()
 	m.daySince = time.Now()
 	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor, requestCellSize)
 }
@@ -325,8 +338,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyNextDay):
 			cmds = append(cmds, m.showDay(m.date.AddDate(0, 0, 1)))
 		case key.Matches(msg, keyFullscreen):
-			if !m.imageOK {
-				break // nothing to make big on a video day
+			if !m.imageReady() {
+				break // nothing to make big on a video day, or while a day loads
 			}
 			if m.State == StateFullscreen {
 				m.State = StateAPOD
@@ -337,7 +350,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// for a sharper one, and sendKitty only goes again if it is bigger
 			cmds = append(cmds, m.sendKitty())
 		case key.Matches(msg, keyPhoto):
-			if m.KittyGraphics && m.imageOK {
+			if m.KittyGraphics && m.imageReady() {
 				m.preferArt = !m.preferArt
 				m.photoToggled = true
 				cmds = append(cmds, m.sendKitty())
@@ -413,24 +426,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.latest = msg.apod.Date // NASA posted a new one under us
 		}
 		m.imageOK = false
+		m.hasImage = msg.hasImage
 		m.kittyReady = false
 		m.sentW, m.sentH = 0, 0
-		m.imageLoading = true
-		m.imageSized = false
-		// a new day starts as art again: the photo is megabytes, and having
-		// asked for it on one picture is not asking for it on every one after
-		m.photoToggled = false
+		// over ssh a new day starts from the default again: the photo is
+		// megabytes, and having asked for it on one picture is not asking
+		// for it on every one after. Locally it costs nothing, so a choice
+		// made once holds.
+		if m.Remote {
+			m.photoToggled = false
+		}
 		m.applyArtDefault()
 		m.placedCols, m.placedRows = 0, 0
 		m.State = StateAPOD
-		cmds = append(cmds, m.loadImage(), m.loadImageSize())
-	case imageSizeMsg:
-		if msg.apod == m.apod {
-			m.imageSized = msg.ok
-		}
+		cmds = append(cmds, m.loadImage())
 	case imageMsg:
+		if msg.apod != m.apod {
+			break // a day the reader has already left
+		}
 		m.imageOK = msg.ok
-		m.imageLoading = false
+		m.hasImage = msg.ok // a picture that never came gives its room back
 		m.applyArtDefault()
 		cmds = append(cmds, m.sendKitty())
 	case kittyMsg:
@@ -450,6 +465,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, spinTick())
 	case msgCopyExpired:
 		m.copiedRecently = false
+	case artMsg:
+		if msg.key == m.artPending {
+			m.artPending = ""
+		}
+		if msg.err != nil {
+			m.artFailed = msg.key
+		}
+		if msg.key == m.artWant.key {
+			m.artWant = artJob{}
+		}
 	}
 
 	// re-run hover hit-testing whenever the layout may have changed under a
@@ -459,23 +484,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hoverKey, m.hoverLink = m.hitTest(m.mouseX, m.mouseY)
 		m.selActive = false // the frame changed under the selection
 	}
-	return m, tea.Batch(cmds...)
+	return m, tea.Batch(append(cmds, m.wantArt())...)
 }
 
 // apodMsg carries the day that was asked for, so a slow answer that a later
-// keypress has already overtaken can be dropped.
+// keypress has already overtaken can be dropped, and whether it has a picture
+// whose size is known: the page is laid out once, from both together.
 type apodMsg struct {
-	date time.Time
-	apod *apod.APOD
+	date     time.Time
+	apod     *apod.APOD
+	hasImage bool
 }
 
+// imageMsg reports the picture's bytes arriving, for the day they belong to.
 type imageMsg struct {
-	ok bool
-}
-
-// imageSizeMsg reports that the picture's size is known, for the day it
-// belongs to: the download may finish after the reader has moved on.
-type imageSizeMsg struct {
 	apod *apod.APOD
 	ok   bool
 }
@@ -513,8 +535,16 @@ func (m *Model) showDay(date time.Time) tea.Cmd {
 	return m.loadAPOD(date)
 }
 
-// loadAPOD fetches one day. The zero date, and the latest day, go through
-// Today: it is the only path that notices when NASA posts a new picture.
+// sizeWait bounds how long a day's text is held back for its picture's size
+// when the metadata does not state it. The size is in the download's first
+// kilobytes, and with it the page is laid out once; a host slower than this
+// gets the text first and a page that adjusts when the picture lands, rather
+// than a reader left waiting on it.
+const sizeWait = 2 * time.Second
+
+// loadAPOD fetches one day, and whether it has a picture of known size. The
+// zero date, and the latest day, go through Today: it is the only path that
+// notices when NASA posts a new picture.
 func (m *Model) loadAPOD(date time.Time) tea.Cmd {
 	latest := m.latest
 	return func() tea.Msg {
@@ -531,7 +561,13 @@ func (m *Model) loadAPOD(date time.Time) tea.Cmd {
 				slog.Error("no valid APOD to fallback to", "error", err)
 			}
 		}
-		return apodMsg{date: date, apod: a}
+		msg := apodMsg{date: date, apod: a}
+		if a != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), sizeWait)
+			msg.hasImage = a.WaitImageSize(ctx).X > 0
+			cancel()
+		}
+		return msg
 	}
 }
 
@@ -541,18 +577,9 @@ func (m *Model) loadImage() tea.Cmd {
 		byt, err := a.ImageBytes()
 		if err != nil || len(byt) == 0 {
 			slog.Warn("APOD has no image", "error", err)
-			return imageMsg{}
+			return imageMsg{apod: a}
 		}
-		return imageMsg{ok: true}
-	}
-}
-
-// loadImageSize hears about the picture's size as soon as its header is in,
-// so the page can be laid out for it before the rest of the photo arrives.
-func (m *Model) loadImageSize() tea.Cmd {
-	a := m.apod
-	return func() tea.Msg {
-		return imageSizeMsg{apod: a, ok: a.WaitImageSize().X > 0}
+		return imageMsg{apod: a, ok: true}
 	}
 }
 
@@ -737,9 +764,9 @@ func (m *Model) render() string {
 func (m *Model) baseView() string {
 	switch m.State {
 	case StateLoading:
-		if m.apod != nil && !worthMentioning(m.daySince) {
-			// hold the day already on screen: most are in hand and arrive in
-			// a millisecond, and a spinner between them is just a flicker
+		if m.apod != nil {
+			// the day already on screen keeps its frame; viewAPOD swaps its
+			// content for a spinner once the wait is worth mentioning
 			return m.viewAPOD()
 		}
 		return m.viewLoading()
@@ -800,20 +827,23 @@ func (m *Model) viewAPOD() string {
 	chrome := countLines(m.viewAPODText(m.Width)) + countLines(linkBlock) + countLines(helpView) + 2
 	bodyH := max(3, m.Height-chrome)
 
+	// a day on its way keeps the header and footer, with the spinner where
+	// its content will be
+	loading := m.dayLoading()
 	// the picture's column is sized to the picture, not the other way round: a
 	// tall one is bound by the rows available and would otherwise sit in the
-	// middle of a column twice its width
-	hasImage := m.imageOK || m.imageLoading
-	sized := m.imageOK || m.imageSized
-	imgW, imgH := room, bodyH // until the size is known, hold the column open
-	if sized {
+	// middle of a column twice its width. Its size comes with the day, so the
+	// box is final before a byte of the picture has arrived.
+	hasImage := !loading && m.hasImage
+	var imgW, imgH int
+	if hasImage {
 		imgW, imgH = fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, room, bodyH, m.cellAspect())
 	}
 	// the gate is horizontal room only. A tall picture is bound by the rows,
 	// not the columns, so it fits to a narrow strip - and stacking it would
 	// hand it half the rows and make it smaller still. Only a wide one, which
 	// wants the width the text wants, is better off above the text.
-	beside := hasImage && room >= imageMinWidth && !(sized && m.imageIsWide())
+	beside := hasImage && room >= imageMinWidth && !m.imageIsWide()
 
 	contentW := textW
 	switch {
@@ -825,6 +855,8 @@ func (m *Model) viewAPOD() string {
 
 	var body string
 	switch {
+	case loading:
+		body = txt.Width(contentW).Height(bodyH).Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
 	case !hasImage:
 		body = m.explBlock(textW, min(bodyH, explMaxHeight), (contentW-textW)/2)
 	case beside:
@@ -879,12 +911,27 @@ func (m *Model) viewAPOD() string {
 // Only the spinner, which has no size of its own, gets the full box.
 func (m *Model) imagePane(w, h int) string {
 	if !m.imageOK {
-		if !worthMentioning(m.daySince) {
-			return txt.Width(w).Height(h).Render("") // cached: it is about to be here
-		}
-		return txt.Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
+		return m.spinnerBox(w, h, m.daySince)
 	}
 	return txt.Width(w).Align(lipgloss.Center).Render(m.picture(w, h))
+}
+
+// spinnerBox fills a box with the loading spinner, once whatever started at
+// since has been going long enough to mention; blank before that, since most
+// waits are over in a moment and a spinner would only flicker.
+func (m *Model) spinnerBox(w, h int, since time.Time) string {
+	box := txt.Width(w).Height(h)
+	if !worthMentioning(since) {
+		return box.Render("")
+	}
+	return box.Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
+}
+
+// dayLoading reports whether the page is waiting on another day long enough to
+// say so. Held back a moment: most days are in hand and arrive in a
+// millisecond, and a spinner between them is just a flicker.
+func (m *Model) dayLoading() bool {
+	return m.State == StateLoading && worthMentioning(m.daySince)
 }
 
 // viewLinkLine is the clickable URL shown under the explanation, with inline
@@ -896,8 +943,8 @@ func (m *Model) viewLinkLine() string {
 	if m.copiedRecently {
 		return m.txtYellow().Bold(true).Render("link copied!")
 	}
-	if m.apod == nil {
-		return "" // first fetch failed: the page already says so
+	if m.apod == nil || m.dayLoading() {
+		return "" // first fetch failed, or this link is the day we are leaving
 	}
 	link := m.apod.ArticleURL
 	st := m.txtMuted()
@@ -937,6 +984,9 @@ func (m *Model) copySelection() tea.Cmd {
 }
 
 // helpKeys returns the keybindings shown (and clickable) in the current state.
+// The list is the day's, not the moment's: an item whose action is not ready
+// yet - the photo still on its way, another day loading - stays in its place
+// disabled, so the bar does not reflow under the reader as things arrive.
 func (m *Model) helpKeys() []key.Binding {
 	switch m.State {
 	case StateFullscreen:
@@ -944,30 +994,39 @@ func (m *Model) helpKeys() []key.Binding {
 	}
 	// the day arrows live in the header now, not here
 	var keys []key.Binding
-	if m.imageOK {
-		keys = append(append(keys, keyFullscreen), m.photoKey()...)
+	if m.hasImage {
+		fullscreen := keyFullscreen
+		fullscreen.SetEnabled(m.imageReady())
+		keys = append(append(keys, fullscreen), m.photoKey()...)
 	}
 	// only worth saying when there is more explanation than is on screen
-	if m.explanationOnScreen() && m.scrolls() {
-		keys = append(keys, key.NewBinding(
-			key.WithKeys("down", "j", glyphDown),
-			key.WithHelp(glyphDown, "scroll"),
-		))
+	if m.scrolls() {
+		scroll := key.NewBinding(key.WithKeys(glyphDown), key.WithHelp(glyphDown, "scroll"))
+		scroll.SetEnabled(m.explanationOnScreen())
+		keys = append(keys, scroll)
 	}
 	return append(keys, keyCopy, keyQuit) // q quit stays last
+}
+
+// imageReady reports whether the picture on screen can be acted on: its bytes
+// are here and it is not a day the reader is already leaving.
+func (m *Model) imageReady() bool {
+	return m.imageOK && m.State != StateLoading
 }
 
 // photoKey is the photo/ascii toggle, offered wherever the picture is and the
 // client can draw a real one. Its label names the action, not both sides.
 func (m *Model) photoKey() []key.Binding {
-	if !m.KittyGraphics || !m.imageOK {
+	if !m.KittyGraphics || !m.hasImage {
 		return nil
 	}
 	desc := "ascii"
 	if m.preferArt {
 		desc = "image"
 	}
-	return []key.Binding{key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", desc))}
+	k := key.NewBinding(key.WithKeys("p", "ctrl+p"), key.WithHelp("p", desc))
+	k.SetEnabled(m.imageReady())
+	return []key.Binding{k}
 }
 
 // viewHelp renders the help bar. Items under the mouse are highlighted; Update
@@ -980,11 +1039,15 @@ func (m *Model) viewHelp() string {
 	return txt.MarginTop(1).Render(strings.Join(items, m.divDot().Render()))
 }
 
-// helpItem renders one keybinding, lit up when the mouse is on it.
+// helpItem renders one keybinding, lit up when the mouse is on it and dimmed
+// while it has nothing to do.
 func (m *Model) helpItem(k key.Binding) string {
 	h := k.Help()
 	keySt, descSt := txt.Bold(true), m.txtMuted()
-	if m.hoverKey == h.Key {
+	switch {
+	case !k.Enabled():
+		keySt, descSt = m.txtSuperMuted(), m.txtSuperMuted()
+	case m.hoverKey == h.Key:
 		keySt = keySt.Foreground(colorYellow).Underline(true)
 		descSt = m.txtYellow()
 	}
@@ -1483,15 +1546,16 @@ func randomArt(client string, maxWidth, maxHeight int, colors ...color.Color) st
 	return colorize(ASCIIAll[pickArt(client, fits)], colors...)
 }
 
-// applyArtDefault picks art vs real photo until the user toggles explicitly:
-// sextant art is the house style, but on tiny viewports it gets too coarse,
-// so small windows default to the real photo.
+// applyArtDefault picks art vs real photo until the user toggles explicitly.
+// Locally the photo is the default: it costs nothing to show. Over ssh it is
+// megabytes down the wire, so sextant art - the house style - is the default,
+// except on tiny viewports where art gets too coarse to read.
 // ponytail: 60x20 threshold is a guess; tune if it feels wrong
 func (m *Model) applyArtDefault() {
 	if m.photoToggled || !m.KittyGraphics {
 		return
 	}
-	m.preferArt = m.Width >= 60 && m.Height >= 20
+	m.preferArt = m.Remote && m.Width >= 60 && m.Height >= 20
 }
 
 // imageArea renders the APOD image into a box of cols x rows cells: a kitty
@@ -1516,31 +1580,55 @@ func (m *Model) imageArea(cols, rows int) string {
 		return kittyPlaceholders(c, r)
 	}
 
-	// while the window is still being dragged, draw nothing new: art costs a
-	// jpeg decode and a pass through chafa, and a drag asks for a dozen sizes
-	// nobody will look at. The one already drawn is shown, cut to the new box,
-	// until the dragging stops - the page itself reflows at once, it is only
-	// the picture that waits.
-	if m.resizing {
-		if s, ok := sextantCached(m.apod.Date.Format(time.DateOnly), c, r, canvasMode(m.Profile)); ok {
-			return strings.TrimSuffix(s, "\n")
+	date, mode := m.apod.Date.Format(time.DateOnly), canvasMode(m.Profile)
+	if s, ok := sextantCached(date, c, r, mode); ok {
+		m.artWant, m.artSince = artJob{}, time.Time{}
+		m.lastArt, m.lastArtFor, m.clipKey = strings.TrimSuffix(s, "\n"), m.apod, ""
+		return m.lastArt
+	}
+
+	// art is a jpeg decode and a pass through chafa: never made inside a
+	// frame, which would hold every keypress and the spinner until it is done.
+	// Asked for here and made by a command (see wantArt); while the window is
+	// still being dragged it is not asked for at all, since a drag passes
+	// through a dozen sizes nobody will look at.
+	job := artJob{key: sextantKey(date, c, r, mode), apod: m.apod, cols: c, rows: r, mode: mode}
+	switch {
+	case job.key == m.artFailed:
+		return m.txtMuted().Render("image unavailable :(")
+	case !m.preferArt && !m.photoSince.IsZero():
+		// the photo is on its way and is what will be shown; its notice
+		// goes over this box, and there is no art worth making meanwhile
+		return txt.Width(c).Height(r).Render("")
+	case !m.resizing:
+		m.artWant = job
+		if m.artSince.IsZero() {
+			m.artSince = time.Now()
 		}
-		// memoized: a frame goes out for every mouse twitch as well as every
-		// resize, and cutting art down is escape-by-escape work - done afresh
-		// each frame it costs more than the drawing it is avoiding
+	}
+
+	// this day's art from a moment ago, cut to the new box, stands in until
+	// the new one is made. Memoized: a frame goes out for every mouse twitch,
+	// and cutting art down is escape-by-escape work
+	if m.lastArtFor == m.apod && m.lastArt != "" {
 		if key := fmt.Sprintf("%dx%d", c, r); key != m.clipKey {
 			m.clipKey, m.clipped = key, clipTo(m.lastArt, c, r)
 		}
 		return m.clipped
 	}
+	return m.spinnerBox(c, r, m.artSince)
+}
 
-	s, err := cachedSextant(m.apod.Date.Format(time.DateOnly), m.apod.Decode, c, r, canvasMode(m.Profile))
-	if err != nil {
-		slog.Warn("failed to render image", "error", err)
-		return m.txtMuted().Render("image unavailable :(")
+// wantArt starts making the art the last frame asked for, once. It runs at the
+// end of every Update, and the spinner's tick is an Update after every frame,
+// so a frame's request is picked up within one tick.
+func (m *Model) wantArt() tea.Cmd {
+	job := m.artWant
+	if job.key == "" || job.key == m.artPending {
+		return nil
 	}
-	m.lastArt, m.clipKey = strings.TrimSuffix(s, "\n"), ""
-	return m.lastArt
+	m.artPending = job.key
+	return job.render
 }
 
 // the arrow glyphs are keys as well as labels: clicking one dispatches it
@@ -1589,7 +1677,7 @@ func (m *Model) dayArrows() (prev, next string) {
 // The caller centers whatever comes back.
 func (m *Model) viewNav(width int) string {
 	prev, next := m.dayArrows()
-	center := m.txtMuted().Render(m.apod.Date.Format("Jan 2, 2006"))
+	center := m.txtMuted().Render(m.date.Format("Jan 2, 2006"))
 
 	inner := min(navMaxWidth, width)
 	pw, cw, nw := lipgloss.Width(prev), lipgloss.Width(center), lipgloss.Width(next)
@@ -1630,6 +1718,9 @@ func (m *Model) viewAPODText(width int) string {
 	// calendar over title, both centered, on rows of their own: with a date on
 	// each arrow the day line is too wide to share one with anything else
 	title := hyperlink(m.apod.ArticleURL, txt.Bold(true).Render(m.apod.Title))
+	if m.dayLoading() {
+		title = " " // the row stays; the title it held belongs to the day we are leaving
+	}
 	return txt.Width(width).Align(lipgloss.Center).Render(m.viewNav(width)+"\n"+title) + "\n\n"
 }
 

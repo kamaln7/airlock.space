@@ -398,7 +398,7 @@ func besideImage(t *testing.T, w, h int) *Model {
 	m.apod.Explanation = strings.Repeat("Some words about deep space and distant galaxies. ", 60)
 	m.apod.ImageSize = image.Point{X: 1059, Y: 1641}
 	m.Session, m.KittyGraphics = io.Discard, true
-	m.imageOK, m.kittyReady = true, true
+	m.hasImage, m.imageOK, m.kittyReady = true, true, true
 	m.apod.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
 	return m
 }
@@ -424,7 +424,7 @@ func TestExplanationSelectableBesideTheImage(t *testing.T) {
 	t.Run("beside", func(t *testing.T) { explSelectable(t, besideImage(t, 150, 34)) })
 	t.Run("video day", func(t *testing.T) {
 		m := besideImage(t, 130, 30)
-		m.imageOK, m.kittyReady = false, false
+		m.hasImage, m.imageOK, m.kittyReady = false, false, false
 		m.apod.ImageSize = image.Point{}
 		explSelectable(t, m)
 	})
@@ -966,7 +966,7 @@ func TestVideoDayKeepsThePageShape(t *testing.T) {
 	}
 	photo := besideImage(t, 130, 30)
 	video := besideImage(t, 130, 30)
-	video.imageOK, video.kittyReady = false, false
+	video.hasImage, video.imageOK, video.kittyReady = false, false, false
 	video.apod.ImageSize = image.Point{}
 
 	for _, needle := range []string{"Some words", "science.nasa.gov", "q quit"} {
@@ -1341,6 +1341,17 @@ func TestFullscreenOnlyResendsWhenItIsWorthIt(t *testing.T) {
 	}
 }
 
+// drawArt renders a frame, then makes the art it asked for, the way the
+// program does between frames.
+func drawArt(t *testing.T, m *Model) {
+	t.Helper()
+	m.baseView()
+	if cmd := m.wantArt(); cmd != nil {
+		m.Update(cmd())
+	}
+	m.baseView()
+}
+
 // art costs a jpeg decode and a pass through chafa. A drag asks for a dozen
 // sizes nobody will look at, so the picture holds still until it stops - while
 // the page around it reflows at once.
@@ -1348,12 +1359,11 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 	m := besideImage(t, 130, 30)
 	m.KittyGraphics, m.kittyReady, m.preferArt = false, false, true
 
-	m.baseView()
+	drawArt(t, m)
 	drawn := m.lastArt
 	if drawn == "" {
 		t.Fatal("no art drawn to begin with")
 	}
-
 	m.Update(tea.WindowSizeMsg{Width: 142, Height: 34})
 	if !m.resizing {
 		t.Fatal("a resize did not start")
@@ -1382,9 +1392,51 @@ func TestResizeHoldsTheArtStill(t *testing.T) {
 	if m.resizing {
 		t.Fatal("the art settle did not release the picture")
 	}
-	m.baseView()
+	drawArt(t, m)
 	if m.lastArt == drawn {
 		t.Error("art was not drawn again once the window stopped")
+	}
+}
+
+// the footer's scroll item does what the down key does
+func TestScrollItemClickScrolls(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.Init()
+	lines := strings.Split(m.baseView(), "\n")
+	row := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(ansi.Strip(l), glyphDown+" scroll") })
+	if row < 0 {
+		t.Fatal("no scroll item in the footer")
+	}
+	start, end, _ := columnSpan(ansi.Strip(lines[row]), glyphDown+" scroll")
+
+	m.Update(tea.MouseClickMsg{X: (start + end) / 2, Y: row, Button: tea.MouseLeft})
+	clicked := m.vp.YOffset()
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if clicked != 1 || m.vp.YOffset() != 2 {
+		t.Errorf("offsets after click, then down: %d, %d; want 1, 2", clicked, m.vp.YOffset())
+	}
+}
+
+// art is a jpeg decode and a pass through chafa. Made inside a frame, it held
+// every keypress and the spinner until it was done - and a day whose bytes had
+// not arrived held them until they did.
+func TestFrameNeverWaitsOnArt(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.KittyGraphics, m.kittyReady, m.preferArt = false, false, true
+	m.apod.Date = day(2001, 1, 1) // the render cache is shared: a day no other test draws
+	release := make(chan struct{})
+	defer close(release)
+	m.apod.ImageBytes = func() ([]byte, error) { <-release; return tinyPNG(), nil }
+
+	drawn := make(chan string, 1)
+	go func() { drawn <- m.baseView() }()
+	select {
+	case <-drawn:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the frame waited for the art")
+	}
+	if m.wantArt() == nil {
+		t.Error("the frame did not ask for the art it lacked")
 	}
 }
 
@@ -1486,10 +1538,11 @@ func TestFastDayDoesNotFlashASpinner(t *testing.T) {
 	}
 }
 
-// the photo is megabytes; asking for it on one day is not asking for it on
-// every day after
-func TestNewDayGoesBackToArt(t *testing.T) {
+// over ssh the photo is megabytes; asking for it on one day is not asking for
+// it on every day after
+func TestNewDayStartsFromTheDefaultOverSSH(t *testing.T) {
 	m := besideImage(t, 130, 30)
+	m.Remote = true
 	m.preferArt = true                              // as a fresh day starts
 	m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"}) // ask for the photo
 	if m.preferArt {
@@ -1499,18 +1552,41 @@ func TestNewDayGoesBackToArt(t *testing.T) {
 		t.Fatal("p did not record that the reader chose")
 	}
 
-	next := &apod.APOD{Picture: apodclient.Picture{Title: "Another Day", Date: day(2026, 8, 19)},
-		Explanation: "more words"}
-	next.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
-	m.date = day(2026, 8, 19)
-	m.Update(apodMsg{date: day(2026, 8, 19), apod: next})
-
+	nextDay(m)
 	if !m.preferArt {
 		t.Error("the photo followed the reader to the next day")
 	}
 	if m.photoToggled {
 		t.Error("the next p should toggle from the default, not from a stale choice")
 	}
+}
+
+// locally the photo costs nothing: it is the default, and a reader who
+// switches to art keeps art from day to day
+func TestLocalChoiceHoldsAcrossDays(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	nextDay(m)
+	if m.preferArt {
+		t.Fatal("a local day did not start with the photo")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if !m.preferArt {
+		t.Fatal("p did not switch to art")
+	}
+	nextDay(m)
+	if !m.preferArt {
+		t.Error("art did not hold into the next day")
+	}
+}
+
+// nextDay lands a new day with a picture and its bytes, as the loaders would.
+func nextDay(m *Model) {
+	next := &apod.APOD{Picture: apodclient.Picture{Title: "Another Day", Date: m.date.AddDate(0, 0, -1),
+		ImageSize: image.Point{X: 32, Y: 48}}, Explanation: "more words"}
+	next.ImageBytes = func() ([]byte, error) { return tinyPNG(), nil }
+	m.date = next.Date
+	m.Update(apodMsg{date: next.Date, apod: next, hasImage: true})
+	m.Update(imageMsg{apod: next, ok: true})
 }
 
 // a slow day that the user has already navigated away from must not land
@@ -1576,7 +1652,7 @@ func TestPhotoIsOnlySentWhenItWillBeSeen(t *testing.T) {
 // the footer offers p on capability, not on having already paid for the upload
 func TestPhotoToggleOfferedBeforeTheUpload(t *testing.T) {
 	m := testModel(t, day(2026, 8, 31))
-	m.KittyGraphics, m.Session, m.imageOK = true, io.Discard, true
+	m.KittyGraphics, m.Session, m.hasImage, m.imageOK = true, io.Discard, true, true
 	m.preferArt, m.kittyReady = true, false
 
 	var keys string
@@ -1614,9 +1690,9 @@ func TestTitleHoldsItsColumnWhilePictureLoads(t *testing.T) {
 		t.Fatal("no title row")
 		return -1
 	}
-	m.imageLoading, m.imageOK = true, false
+	m.imageOK = false // the picture's bytes still on their way
 	loading := titleCol()
-	m.imageLoading, m.imageOK = false, true
+	m.imageOK = true
 	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}} {
 		m.apod.ImageSize = sz
 		if got := titleCol(); got != loading {
@@ -1642,9 +1718,9 @@ func TestExplanationHoldsItsPlaceOnceThePictureSizeIsKnown(t *testing.T) {
 	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}} {
 		m := besideImage(t, 151, 40)
 		m.apod.ImageSize = sz
-		m.imageLoading, m.imageSized, m.imageOK = true, true, false
+		m.imageOK = false // the size came with the day; the bytes have not
 		loadingRow, loadingCol := explAt(m)
-		m.imageLoading, m.imageOK = false, true
+		m.imageOK = true
 		if row, col := explAt(m); row != loadingRow || col != loadingCol {
 			t.Errorf("picture %v: explanation at %d,%d; was %d,%d while loading", sz, row, col, loadingRow, loadingCol)
 		}

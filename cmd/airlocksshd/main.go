@@ -175,6 +175,7 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		Height:        h,
 		KittyGraphics: supportsKittyGraphics(pty.Term, termProgram(s.Environ())),
 		Session:       out,
+		Remote:        true,
 		WidthPixels:   pty.Window.WidthPixels,
 		HeightPixels:  pty.Window.HeightPixels,
 	}

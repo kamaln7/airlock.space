@@ -11,8 +11,11 @@ ssh airlock.space   # no installation needed :)
   <img src="docs/ascii.png" width="1561" alt="APOD rendered as sextant blocks alongside the day's explanation">
 </p>
 
-Terminals that speak the kitty graphics protocol (kitty, Ghostty) get the real
-photograph.
+Terminals that speak the kitty graphics protocol (kitty, Ghostty, Rex) get the
+real photograph; `p` switches between it and the art. Run locally or in the
+browser, the photo is the default and your choice holds as you browse days.
+Over SSH the photo is megabytes down the wire, so each day starts as art on
+larger windows.
 
 <p align="center">
   <img src="docs/photo.png" width="1561" alt="The same picture full-bleed via the kitty graphics protocol">

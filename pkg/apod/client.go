@@ -10,8 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +43,10 @@ type Picture struct {
 	// ImageURL is the full-size featured image URL. It is empty when the
 	// picture has no featured image. Videos may still have one, as a poster.
 	ImageURL string
+	// ImageSize is the featured image's size in pixels, as NASA's image
+	// service states it in ImageURL's w and h parameters; the zero value
+	// when the URL does not say.
+	ImageSize image.Point
 	// ExplanationHTML is the explanation exactly as published, including
 	// its HTML markup.
 	ExplanationHTML string
@@ -159,8 +166,26 @@ func (w *wirePicture) entry() (*Picture, error) {
 		Title:           w.Title,
 		ArticleURL:      w.URL,
 		ImageURL:        w.HDURL,
+		ImageSize:       urlImageSize(w.HDURL),
 		ExplanationHTML: w.Explanation,
 	}, nil
+}
+
+// urlImageSize reads the size NASA's image service puts in its URLs
+// (".../x_2752.jpg?w=2752&h=2208&fit=clip"). Undocumented, so anything
+// missing or malformed is simply not a size.
+func urlImageSize(raw string) image.Point {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return image.Point{}
+	}
+	q := u.Query()
+	w, errW := strconv.Atoi(q.Get("w"))
+	h, errH := strconv.Atoi(q.Get("h"))
+	if errW != nil || errH != nil || w <= 0 || h <= 0 {
+		return image.Point{}
+	}
+	return image.Point{X: w, Y: h}
 }
 
 // getJSON decodes one JSON response directly from the HTTP body.

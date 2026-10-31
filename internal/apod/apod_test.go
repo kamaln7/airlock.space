@@ -67,7 +67,7 @@ func TestImageSizeIsKnownBeforeTheBodyArrives(t *testing.T) {
 
 	a := mustAPOD(t, &apodclient.Picture{ImageURL: srv.URL + "/apod.png"})
 	got := make(chan image.Point, 1)
-	go func() { got <- a.WaitImageSize() }()
+	go func() { got <- a.WaitImageSize(t.Context()) }()
 	select {
 	case sz := <-got:
 		if sz != (image.Point{X: 40, Y: 30}) {

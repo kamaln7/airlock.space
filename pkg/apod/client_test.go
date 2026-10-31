@@ -3,6 +3,7 @@ package apod
 import (
 	"context"
 	"errors"
+	"image"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,7 @@ const entryJSON = `{
 	"title": "Cocoon Nebula Wide Field",
 	"explanation": "<strong>Explanation:</strong> <a href=\"http://example.com/\">A nebula</a> & more.",
 	"url": "https://science.nasa.gov/image-article/apod-2014-september-18-cocoon-nebula-wide-field/",
-	"hdurl": "https://assets.science.nasa.gov/cocoon.jpg?w=3000",
+	"hdurl": "https://assets.science.nasa.gov/cocoon.jpg?w=3000&h=2000&fit=clip",
 	"basic_html": "<html>discarded</html>"
 }`
 
@@ -29,11 +30,28 @@ func wantEntry(t *testing.T, got *Picture) {
 		Date:            time.Date(2014, time.September, 18, 0, 0, 0, 0, time.UTC),
 		Title:           "Cocoon Nebula Wide Field",
 		ArticleURL:      "https://science.nasa.gov/image-article/apod-2014-september-18-cocoon-nebula-wide-field/",
-		ImageURL:        "https://assets.science.nasa.gov/cocoon.jpg?w=3000",
+		ImageURL:        "https://assets.science.nasa.gov/cocoon.jpg?w=3000&h=2000&fit=clip",
+		ImageSize:       image.Point{X: 3000, Y: 2000},
 		ExplanationHTML: `<strong>Explanation:</strong> <a href="http://example.com/">A nebula</a> & more.`,
 	}
 	if *got != want {
 		t.Errorf("entry = %+v, want %+v", got, want)
+	}
+}
+
+// a URL that does not fully state a size states none: a guessed size would lay
+// the page out for a picture that is not there
+func TestImageSizeNeedsBothDimensions(t *testing.T) {
+	for _, raw := range []string{
+		"https://assets.science.nasa.gov/cocoon.jpg",
+		"https://assets.science.nasa.gov/cocoon.jpg?w=3000",
+		"https://assets.science.nasa.gov/cocoon.jpg?w=3000&h=tall",
+		"https://assets.science.nasa.gov/cocoon.jpg?w=0&h=2000",
+		"",
+	} {
+		if got := urlImageSize(raw); got != (image.Point{}) {
+			t.Errorf("urlImageSize(%q) = %v; want none", raw, got)
+		}
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,11 +51,11 @@ type APOD struct {
 	// Decode on demand and discard: a decoded APOD is tens of MB, the box has 512.
 	ImageBytes resolvable.V[[]byte]
 
-	// ImageSize is the picture's size in pixels. It is known from the first
-	// few kilobytes of the download; WaitImageSize says when.
-	ImageSize image.Point
-	sized     chan struct{} // closed once ImageSize is set
-	sizeOnce  sync.Once
+	// Picture.ImageSize is usually stated by the metadata. When it is not, the
+	// download learns it from the image's first few kilobytes; WaitImageSize
+	// says when it is known.
+	sized    chan struct{} // closed once ImageSize is set
+	sizeOnce sync.Once
 }
 
 // First is the day APOD began; there is nothing to browse before it.
@@ -195,6 +196,9 @@ func newAPOD(entry *apodclient.Picture) (*APOD, error) {
 		return nil, fmt.Errorf("converting explanation: %w", err)
 	}
 	a := &APOD{Picture: *entry, Explanation: dropExplanationLabel(explanation), sized: make(chan struct{})}
+	if a.ImageSize != (image.Point{}) {
+		a.setSize(a.ImageSize)
+	}
 	a.ImageBytes = resolvable.New(a.getImageBytes,
 		resolvable.Retry(3, nil),
 		resolvable.CacheForever(),
@@ -416,19 +420,28 @@ func fetchImage(ctx context.Context, url string, onSize func(image.Point)) ([]by
 
 // setSize records the picture's size once; a retried download is the same
 // picture, and readers rely on the value not moving after sized is closed.
+// The stated size is the box NASA's image service fits the picture into, so
+// a measurement a pixel short of it is the same picture; one of another shape
+// means the page was laid out wrong, which is worth knowing.
 func (a *APOD) setSize(p image.Point) {
+	first := false
 	a.sizeOnce.Do(func() {
+		first = true
 		a.ImageSize = p
 		if a.sized != nil {
 			close(a.sized)
 		}
 	})
+	if s := a.ImageSize; !first && p.Y > 0 && s.Y > 0 && math.Abs(float64(p.X)/float64(p.Y)-float64(s.X)/float64(s.Y)) > 0.01 {
+		slog.Warn("image is not the shape stated", "date", a.Date.Format(time.DateOnly), "stated", s, "measured", p)
+	}
 }
 
 // WaitImageSize blocks until the picture's size is known, which is usually
 // long before ImageBytes resolves, and returns it. It returns the zero size
-// when the day turns out to have no image or the download fails.
-func (a *APOD) WaitImageSize() image.Point {
+// when the day turns out to have no image, the download fails, or ctx ends
+// first; the download itself carries on regardless.
+func (a *APOD) WaitImageSize(ctx context.Context) image.Point {
 	done := make(chan struct{})
 	go func() {
 		a.ImageBytes() // coalesces with the caller already fetching it
@@ -437,6 +450,8 @@ func (a *APOD) WaitImageSize() image.Point {
 	select {
 	case <-a.sized:
 	case <-done:
+	case <-ctx.Done():
+		return image.Point{}
 	}
 	return a.ImageSize
 }

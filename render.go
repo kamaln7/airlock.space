@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
+	"github.com/kamaln7/airlock.space/internal/apod"
 	"github.com/kamaln7/airlock.space/internal/chafa"
 	xdraw "golang.org/x/image/draw"
 )
@@ -101,6 +105,29 @@ func cachedSextant(date string, decode func() (image.Image, error), cols, rows i
 	renderCache.entries[key] = s
 	renderCache.Unlock()
 	return s, nil
+}
+
+// artJob is one piece of sextant art a frame wanted and did not have.
+type artJob struct {
+	key        string
+	apod       *apod.APOD
+	cols, rows int
+	mode       chafa.Mode
+}
+
+// artMsg reports art made, or not, under its cache key.
+type artMsg struct {
+	key string
+	err error
+}
+
+// render makes the art into the shared cache, where the next frame finds it.
+func (j artJob) render() tea.Msg {
+	_, err := cachedSextant(j.apod.Date.Format(time.DateOnly), j.apod.Decode, j.cols, j.rows, j.mode)
+	if err != nil {
+		slog.Warn("failed to render image", "error", err)
+	}
+	return artMsg{key: j.key, err: err}
 }
 
 // kittyPNG encodes the photo for transmission, scaled to fit maxW x maxH
