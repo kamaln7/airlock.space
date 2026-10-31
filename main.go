@@ -187,7 +187,6 @@ type Model struct {
 	photoToggled   bool      // user overrode the art/photo default with the keybind
 	copiedRecently bool
 	hoverKey       string // help bar item under the mouse
-	hoverLink      bool   // mouse is over the URL under the explanation
 	mouseX         int    // last seen mouse position
 	mouseY         int
 	selAnchor      point // in-app text selection (mouse tracking eats the
@@ -407,21 +406,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
-		m.hoverKey, m.hoverLink = m.hitTest(msg.X, msg.Y)
+		m.hoverKey = m.hitTest(msg.X, msg.Y)
 	case tea.MouseClickMsg:
 		switch msg.Button {
 		case tea.MouseLeft:
 			m.selActive, m.selPending = false, false
-			helpKey, onLink := m.hitTest(msg.X, msg.Y)
-			if helpKey != "" {
+			if helpKey := m.hitTest(msg.X, msg.Y); helpKey != "" {
 				// dispatch the clicked help item as if its key was pressed
 				r := []rune(helpKey)[0]
 				return m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
-			}
-			// in the browser the terminal opens the link itself on click, so
-			// copying it here would flash feedback over a link that just opened
-			if onLink && runtime.GOOS != "js" {
-				cmds = append(cmds, m.copyLink())
 			}
 			// selection can start anywhere; it only ever applies to copyable text
 			m.selPending = true
@@ -504,7 +497,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// stationary mouse: any keypress (footer items appear/disappear even
 	// within a state, e.g. the explanation/image toggle) or state change
 	if _, isKey := msg.(tea.KeyMsg); isKey || m.State != prevState {
-		m.hoverKey, m.hoverLink = m.hitTest(m.mouseX, m.mouseY)
+		m.hoverKey = m.hitTest(m.mouseX, m.mouseY)
 		m.selActive = false // the frame changed under the selection
 	}
 	return m, tea.Batch(append(cmds, m.wantArt())...)
@@ -753,11 +746,11 @@ var (
 	)
 	keyCopy = key.NewBinding(
 		key.WithKeys("c"),
-		key.WithHelp("c", "copy link"),
+		key.WithHelp("c", "copy nasa link"),
 	)
 	keyOpen = key.NewBinding(
 		key.WithKeys("o"),
-		key.WithHelp("o", "open in new tab"),
+		key.WithHelp("o", "open nasa page"),
 	)
 	// v2 asks the terminal for key disambiguation, so ctrl+shift+c finally
 	// arrives as itself rather than as ctrl+c. Kept off the help bar: whether
@@ -851,16 +844,23 @@ func (m *Model) explBlock(width, maxHeight, col int) string {
 // it, since a panorama and a column of text both want the same width.
 func (m *Model) viewAPOD() string {
 	avail := m.Width - 2 // side margins
-	helpView := m.viewHelp()
-	linkBlock := m.viewLinkLine()
 
 	textW := min(explMaxWidth, avail)
 	room := min(imageMaxWidth, avail-textW-paneGap)
 
+	// the footer runs under the whole width, centred on the screen as the
+	// header is, and wraps where the screen is narrower than it. Its rows are
+	// budgeted with the scroll item in: that only appears once the
+	// explanation has been measured, below, and must not cost a row the body
+	// was already given.
+	footer := func(keys []key.Binding) string {
+		return txt.Width(m.Width).Align(lipgloss.Center).Render(m.helpLine(keys))
+	}
+
 	// how many rows the body has, measured against the widest the content
 	// could be. Wide enough for a picture beside the text, the header is a
 	// fixed three rows, so this does not shift under the layout it decides.
-	chrome := countLines(m.viewAPODText(m.Width)) + countLines(linkBlock) + countLines(helpView) + 2
+	chrome := countLines(m.viewAPODText(m.Width)) + 1 + countLines(footer(m.helpKeysWith(true)))
 	bodyH := max(3, m.Height-chrome)
 
 	// a day on its way keeps the header and footer, with the spinner where
@@ -912,33 +912,25 @@ func (m *Model) viewAPOD() string {
 			m.imagePane(contentW, imgH), "", txt.MarginLeft(col).Render(text))
 	}
 
-	// rendered again now the body has been built: whether the explanation
-	// scrolls is only known once the viewport has its content, and the first
-	// frame of a day would otherwise offer no scroll hint. Its line count does
-	// not change, so the rows budgeted above still hold.
-	helpView = m.viewHelp()
-
-	page := lipgloss.JoinVertical(lipgloss.Left,
-		// the body holds the rows it was given whether or not it fills them,
-		// so a video day - explanation and nothing beside it - sits where a
-		// day with a picture does, top-aligned, rather than floating to the
-		// middle of the screen with the link and help bar tucked under it
-		txt.Width(contentW).Height(bodyH).AlignVertical(lipgloss.Top).Render(body),
-		"",
-		txt.Width(contentW).Align(lipgloss.Center).Render(linkBlock),
-		txt.Width(contentW).Align(lipgloss.Center).Render(helpView),
-	)
+	// the body holds the rows it was given whether or not it fills them, so a
+	// video day - explanation and nothing beside it - sits where a day with a
+	// picture does, top-aligned, rather than floating to the middle of the
+	// screen with the help bar tucked under it
+	page := txt.Width(contentW).Height(bodyH).AlignVertical(lipgloss.Top).Render(body)
 	// Place centers every line, so the explanation's own columns shift by the
 	// same margin the content box does
 	m.explCol += (m.Width - contentW) / 2
 	// the header is centered on the screen, not on the content box: that box
 	// is as wide as the picture turns out to be, so the title would otherwise
 	// shift once the picture's size is known and the column beside the text
-	// narrows to fit it
+	// narrows to fit it. The footer is built now the body has been, so the
+	// scroll item is there on the first frame of a day.
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		m.viewAPODText(m.Width),
-		lipgloss.PlaceHorizontal(m.Width, lipgloss.Center, page))
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, content)
+		lipgloss.PlaceHorizontal(m.Width, lipgloss.Center, page),
+		"",
+		footer(m.helpKeys()))
+	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Top, content)
 }
 
 // imagePane is the picture in a box of its own height, never a taller one:
@@ -969,31 +961,10 @@ func (m *Model) dayLoading() bool {
 	return m.dayWait.show(m.State == StateLoading)
 }
 
-// viewLinkLine is the clickable URL shown under the explanation, with inline
-// copy feedback. Same row either way, so the layout doesn't jump.
-func (m *Model) viewLinkLine() string {
-	// the feedback replaces the URL rather than sitting under it: one row
-	// either way, so nothing shifts, and no row is reserved for a hint that
-	// is almost never showing
-	if m.copiedRecently {
-		return m.txtYellow().Bold(true).Render("link copied!")
-	}
-	if m.apod == nil || m.dayLoading() {
-		return "" // first fetch failed, or this link is the day we are leaving
-	}
-	link := m.apod.ArticleURL
-	st := m.txtMuted()
-	if m.hoverLink {
-		st = m.txtYellow()
-	}
-	// hyperlink outside the style, never inside: lipgloss styles rune by rune
-	// under Underline, which shreds an embedded escape into literal text
-	return hyperlink(link, st.Render(link))
-}
-
 type msgCopyExpired struct{}
 
-// copyLink puts the APOD link on the client clipboard and shows brief feedback.
+// copyLink puts the APOD link on the client clipboard; its footer item says so
+// for a moment.
 func (m *Model) copyLink() tea.Cmd {
 	if m.apod == nil {
 		return nil
@@ -1023,6 +994,11 @@ func (m *Model) copySelection() tea.Cmd {
 // yet - the photo still on its way, another day loading - stays in its place
 // disabled, so the bar does not reflow under the reader as things arrive.
 func (m *Model) helpKeys() []key.Binding {
+	return m.helpKeysWith(m.scrolls())
+}
+
+// helpKeysWith is helpKeys with the scroll item in or out as asked.
+func (m *Model) helpKeysWith(scroll bool) []key.Binding {
 	switch m.State {
 	case StateFullscreen:
 		return append([]key.Binding{keyFullscreen}, append(m.photoKey(), keyQuit)...)
@@ -1035,17 +1011,26 @@ func (m *Model) helpKeys() []key.Binding {
 		keys = append(append(keys, fullscreen), m.photoKey()...)
 	}
 	// only worth saying when there is more explanation than is on screen
-	if m.scrolls() {
+	if scroll {
 		scroll := key.NewBinding(key.WithKeys(glyphDown), key.WithHelp(glyphDown, "scroll"))
 		scroll.SetEnabled(m.explanationOnScreen())
 		keys = append(keys, scroll)
 	}
-	link := keyCopy
-	if m.OpenURL != nil {
-		link = keyOpen
+	// copying says so in its own place, at its own width, so nothing else in
+	// the bar moves; opening is offered where there is a browser to open in
+	links := []key.Binding{keyCopy}
+	if m.copiedRecently {
+		links[0] = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", copiedDesc))
 	}
-	return append(keys, link, keyQuit) // q quit stays last
+	if m.OpenURL != nil {
+		links = append(links, keyOpen)
+	}
+	return append(append(keys, links...), keyQuit) // q quit stays last
 }
+
+// copiedDesc is the copy item's word for a moment after copying, centred in
+// the width of its usual one.
+var copiedDesc = lipgloss.PlaceHorizontal(lipgloss.Width(keyCopy.Help().Desc), lipgloss.Center, "copied!")
 
 // imageReady reports whether the picture on screen can be acted on: its bytes
 // are here and it is not a day the reader is already leaving.
@@ -1068,14 +1053,14 @@ func (m *Model) photoKey() []key.Binding {
 	return []key.Binding{k}
 }
 
-// viewHelp renders the help bar. Items under the mouse are highlighted; Update
+// helpLine renders the help bar. Items under the mouse are highlighted; Update
 // hit-tests clicks against the same "key desc" spans.
-func (m *Model) viewHelp() string {
+func (m *Model) helpLine(keys []key.Binding) string {
 	var items []string
-	for _, k := range m.helpKeys() {
+	for _, k := range keys {
 		items = append(items, m.helpItem(k))
 	}
-	return txt.MarginTop(1).Render(strings.Join(items, m.divDot().Render()))
+	return strings.Join(items, m.divDot().Render())
 }
 
 // helpItem renders one keybinding, lit up when the mouse is on it and dimmed
@@ -1086,6 +1071,8 @@ func (m *Model) helpItem(k key.Binding) string {
 	switch {
 	case !k.Enabled():
 		keySt, descSt = m.txtSuperMuted(), m.txtSuperMuted()
+	case h.Desc == copiedDesc:
+		keySt, descSt = keySt.Foreground(colorYellow), m.txtYellow().Bold(true)
 	case m.hoverKey == h.Key:
 		keySt = keySt.Foreground(colorYellow).Underline(true)
 		descSt = m.txtYellow()
@@ -1267,28 +1254,19 @@ func (m *Model) navHit(line string, x int) string {
 }
 
 // hitTest resolves what's under the mouse in one frame render: a key to
-// dispatch (or "") and whether the link URL is hovered. Both the help bar and
-// the header's day arrows answer with the key they stand for, so a click on
-// either is dispatched the same way.
-func (m *Model) hitTest(x, y int) (helpKey string, link bool) {
+// dispatch, or "". Both the help bar and the header's day arrows answer with
+// the key they stand for, so a click on either is dispatched the same way.
+func (m *Model) hitTest(x, y int) string {
 	line := m.frameLine(y)
 	if m.isHelpLine(line) {
 		for _, k := range m.helpKeys() {
 			h := k.Help()
 			if start, end, ok := columnSpan(line, h.Key+" "+h.Desc); ok && x >= start && x < end {
-				helpKey = h.Key
-				break
+				return h.Key
 			}
 		}
 	}
-	if helpKey == "" {
-		helpKey = m.navHit(line, x)
-	}
-	if m.apod != nil {
-		start, end, ok := columnSpan(line, m.apod.ArticleURL)
-		link = ok && x >= start && x < end
-	}
-	return helpKey, link
+	return m.navHit(line, x)
 }
 
 // the scrollbar is drawn rather than composed: the viewport offers a left
@@ -1853,6 +1831,6 @@ func (m *Model) viewFullscreen() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.Place(m.Width, m.Height-1, lipgloss.Center, lipgloss.Center,
 			m.picture(m.Width, m.Height-1)),
-		txt.Width(m.Width).Align(lipgloss.Center).Render(strings.TrimSpace(m.viewHelp())),
+		txt.Width(m.Width).Align(lipgloss.Center).Render(m.helpLine(m.helpKeys())),
 	)
 }

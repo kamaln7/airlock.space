@@ -65,7 +65,7 @@ func TestVideoDayOffersNoImageKeys(t *testing.T) {
 // only the ones this app has no use for.
 func TestLongExplanationScrolls(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
-	m.apod.Explanation = strings.Repeat("some words about space. ", 60)
+	m.apod.Explanation = strings.Repeat("some words about space. ", 90)
 	m.Height = 30
 
 	if n := countLines(m.baseView()); n > m.Height {
@@ -116,37 +116,6 @@ func TestVisibleDateArrowRemainsClickableWhenFrameOverflows(t *testing.T) {
 		}
 	}
 	t.Fatal("the previous-day arrow is not visible")
-}
-
-// Hyperlinks wrap styled text so SGR styling cannot corrupt their OSC 8 escapes.
-func TestLinkHyperlinkSurvivesStyling(t *testing.T) {
-	m := &Model{Width: 100, Height: 40, hoverLink: true,
-		apod: &apod.APOD{Picture: apodclient.Picture{Title: "A Test Nebula",
-			ArticleURL: "https://science.nasa.gov/image-article/test-nebula/",
-			Date:       time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)},
-			Explanation: "some words about space."}}
-	m.State = StateAPOD
-
-	link := m.apod.ArticleURL
-	for y, raw := range strings.Split(m.baseView(), "\n") {
-		line := ansi.Strip(raw)
-		if !strings.Contains(line, "science.nasa.gov") {
-			continue
-		}
-		// the escape must be gone once stripped, leaving only the visible URL
-		if strings.Contains(line, "]8;;") {
-			t.Fatalf("row %d: hyperlink escape rendered as text: %q", y, line)
-		}
-		start, end, ok := columnSpan(line, link)
-		if !ok {
-			t.Fatalf("row %d: link not found in %q", y, line)
-		}
-		if _, hit := m.hitTest((start+end)/2, y); !hit {
-			t.Errorf("row %d: no hover hit at the link's own columns", y)
-		}
-		return
-	}
-	t.Fatal("no link row in the frame")
 }
 
 func day(y int, mo time.Month, d int) time.Time {
@@ -274,11 +243,11 @@ func TestHeaderArrowClickNavigates(t *testing.T) {
 	}
 	start, end, _ := columnSpan(ansi.Strip(lines[row]), label)
 
-	if got, _ := m.hitTest((start+end)/2, row); got != "\u2190" {
+	if got := m.hitTest((start+end)/2, row); got != "\u2190" {
 		t.Fatalf("hitTest on the arrow = %q; want the prev-day key", got)
 	}
 	// the whole label is the target, not just the glyph
-	if got, _ := m.hitTest(end-1, row); got != "\u2190" {
+	if got := m.hitTest(end-1, row); got != "\u2190" {
 		t.Errorf("hitTest on the arrow's date = %q; want the prev-day key", got)
 	}
 
@@ -288,36 +257,48 @@ func TestHeaderArrowClickNavigates(t *testing.T) {
 	}
 }
 
-// outside a browser nothing opens the footer URL on click, so the click copies it
-func TestFooterLinkClickCopiesNatively(t *testing.T) {
+// copying says so in the copy item's own place, at its width: the rest of the
+// footer stays exactly where it was
+func TestCopyFeedbackKeepsTheFooterStill(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
-	lines := strings.Split(m.baseView(), "\n")
-	row := slices.IndexFunc(lines, func(l string) bool {
-		return strings.Contains(ansi.Strip(l), m.apod.ArticleURL)
-	})
-	if row < 0 {
-		t.Fatal("no footer link on the frame")
+	footer := func() string {
+		lines := strings.Split(ansi.Strip(m.baseView()), "\n")
+		i := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "q quit") })
+		if i < 0 {
+			t.Fatal("no footer")
+		}
+		return lines[i]
 	}
-	start, end, _ := columnSpan(ansi.Strip(lines[row]), m.apod.ArticleURL)
-
-	m.Update(tea.MouseClickMsg{X: (start + end) / 2, Y: row, Button: tea.MouseLeft})
-	if !m.copiedRecently {
-		t.Error("clicking the footer URL did not copy it")
+	before := footer()
+	m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	copied := footer()
+	if !strings.Contains(copied, "copied!") {
+		t.Fatalf("no copy feedback in %q", copied)
+	}
+	if a, b := strings.Index(before, "q quit"), strings.Index(copied, "q quit"); a != b {
+		t.Errorf("the footer moved while saying copied: q quit at %d, was %d", b, a)
+	}
+	m.Update(msgCopyExpired{})
+	if footer() != before {
+		t.Error("the footer did not go back once the feedback expired")
 	}
 }
 
-// in the browser the footer offers to open the day's article in a new tab,
-// where elsewhere it offers to copy its link
-func TestBrowserOffersOpenInNewTab(t *testing.T) {
+// the footer offers the day's NASA page to copy everywhere and, where there is
+// a browser to open it in, to open
+func TestFooterOffersTheNASAPage(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
-	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy link") || strings.Contains(frame, "open in new tab") {
-		t.Error("outside the browser the footer should offer copying the link")
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy nasa link") || strings.Contains(frame, "open nasa page") {
+		t.Error("without a browser the footer should offer copying the link, and only that")
+	}
+	if strings.Contains(ansi.Strip(m.baseView()), m.apod.ArticleURL) {
+		t.Error("the URL is on the page; it belongs to the goodbye")
 	}
 
 	var opened string
 	m.OpenURL = func(url string) { opened = url }
-	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "o open in new tab") || strings.Contains(frame, "copy link") {
-		t.Error("in the browser the footer should offer opening the link in place of copying it")
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy nasa link") || !strings.Contains(frame, "o open nasa page") {
+		t.Error("in the browser the footer should offer both copying and opening")
 	}
 	m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
 	if opened != m.apod.ArticleURL {
@@ -669,15 +650,11 @@ func TestWrappedLabelStaysClickable(t *testing.T) {
 	}
 }
 
-// the title and the article's address are the page's own links, not the
-// explanation's
-func TestArticleLinksAreClickable(t *testing.T) {
+// the title is the page's own link to the article, not the explanation's
+func TestArticleLinkIsTheTitle(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
-	got := clickable(cellsOf(m.baseView()))[m.apod.ArticleURL]
-	for _, want := range []string{"ATestNebula", m.apod.ArticleURL} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the text under the article link is %q; it lacks %q", got, want)
-		}
+	if got := clickable(cellsOf(m.baseView()))[m.apod.ArticleURL]; got != "ATestNebula" {
+		t.Errorf("the text under the article link is %q; want the title", got)
 	}
 }
 
@@ -744,7 +721,7 @@ func TestSelectionCopiesRenderedText(t *testing.T) {
 		t.Errorf("selectionText() = %q; want %q", got, want)
 	}
 
-	for _, furniture := range []string{m.apod.ArticleURL, "copy link", "Aug 20, 2026"} {
+	for _, furniture := range []string{"copy nasa link", "Aug 20, 2026"} {
 		_, line := at(furniture)
 		if x1, x2, ok := m.copyableSpan(line); ok && strings.Contains(ansi.Cut(line, x1, x2), furniture) {
 			t.Errorf("%q is selectable; only the title and the explanation are", furniture)
@@ -988,7 +965,7 @@ func TestVideoDayKeepsThePageShape(t *testing.T) {
 	video.hasImage, video.imageOK, video.kittyReady = false, false, false
 	video.apod.ImageSize = image.Point{}
 
-	for _, needle := range []string{"Some words", "science.nasa.gov", "q quit"} {
+	for _, needle := range []string{"Some words", "q quit"} {
 		a, b := rowOf(photo, needle), rowOf(video, needle)
 		if a < 0 || a != b {
 			t.Errorf("%q is on row %d with a picture and row %d without", needle, a, b)
@@ -1142,7 +1119,7 @@ func TestFullscreenStacksHelpBesideATallPicture(t *testing.T) {
 		t.Fatalf("row %d is not recognised as help: %q", row, strings.TrimSpace(line))
 	}
 	start, end, _ := columnSpan(line, "q quit")
-	if got, _ := m.hitTest((start+end)/2, row); got != "q" {
+	if got := m.hitTest((start+end)/2, row); got != "q" {
 		t.Errorf("hitTest on the stacked quit item = %q", got)
 	}
 }

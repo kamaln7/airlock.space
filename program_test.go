@@ -56,7 +56,7 @@ func TestProgramPaintsAndQuits(t *testing.T) {
 		{"its second paragraph", "A second paragraph, with a"},
 		{"its link label", "link label"},
 		{"the help bar", "quit"},
-		{"the link", "science.nasa.gov"},
+		{"the title's address, for the terminal to use", "science.nasa.gov"},
 		{"the label's address, for the terminal to use", "https://example.com/page"},
 	} {
 		if !strings.Contains(frame, want.seq) {
