@@ -23,11 +23,11 @@ func main() {
 	term, termProgram := os.Getenv("TERM"), os.Getenv("TERM_PROGRAM")
 	kitty := false
 	switch strings.ToLower(term) {
-	case "xterm-kitty", "xterm-ghostty":
+	case "xterm-kitty", "xterm-ghostty", "xterm-rex", "rex":
 		kitty = true
 	}
 	switch strings.ToLower(termProgram) {
-	case "kitty", "ghostty":
+	case "kitty", "ghostty", "rex":
 		kitty = true
 	}
 	if os.Getenv("NO_KITTY") != "" {

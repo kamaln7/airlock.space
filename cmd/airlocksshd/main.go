@@ -226,7 +226,7 @@ func sessionProfile(s ssh.Session) colorprofile.Profile {
 	}
 	p := colorprofile.Env(env)
 	switch strings.ToLower(termProgram(env)) {
-	case "iterm2", "iterm.app", "kitty", "ghostty", "wezterm":
+	case "iterm2", "iterm.app", "kitty", "ghostty", "rex", "wezterm":
 		return max(p, colorprofile.TrueColor)
 	}
 	return p
@@ -238,11 +238,11 @@ func sessionProfile(s ssh.Session) colorprofile.Profile {
 // are listed. (wezterm speaks the protocol but not placeholders.)
 func supportsKittyGraphics(term, termProgram string) bool {
 	switch strings.ToLower(term) {
-	case "xterm-kitty", "xterm-ghostty":
+	case "xterm-kitty", "xterm-ghostty", "xterm-rex", "rex":
 		return true
 	}
 	switch strings.ToLower(termProgram) {
-	case "kitty", "ghostty":
+	case "kitty", "ghostty", "rex":
 		return true
 	}
 	return false
