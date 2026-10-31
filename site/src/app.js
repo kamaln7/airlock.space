@@ -11,9 +11,9 @@ const restart = document.getElementById('restart');
 //
 // The bar is Bubbles' progress bar (charm.land/bubbles/v2/progress) in this
 // palette, with its blend scaled to the filled part (WithScaled): the fill
-// runs the whole way from grey to the accent at every length, so its leading
-// edge is always the accent and a short bar is not just grey. Colours mix in
-// OKLab (Bubbles' Lip Gloss mixes in CIELAB), so the steps look even. The
+// runs the whole way from dim gold to the accent at every length, so its
+// leading edge is always the accent. Colours mix in OKLab (Bubbles' Lip Gloss
+// mixes in CIELAB), so the steps look even. The
 // shown fraction chases the real one on Bubbles' critically damped spring
 // (angular frequency 18, damping ratio 1) rather than jumping with each
 // chunk, and its edge advances in eighths of a cell, so the motion is smooth
@@ -24,8 +24,7 @@ const MOON = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
 const LABEL = 'loading...'; // the program's, which the bar stands in for
 const BAR_CELLS = LABEL.length;
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-const BLEND_FROM = [0x5c, 0x5c, 0x5c]; // colorMuted (dark) in main.go
-const BLEND_TO = [0xff, 0xd7, 0x00]; // ANSI 220, colorYellow in main.go
+const ACCENT = [0xff, 0xd7, 0x00]; // ANSI 220, colorYellow in main.go
 // The track is the shade Bubbles' ░ comes to here (colorSuperMuted at a
 // quarter over the page's ink), laid as a background rather than a glyph so
 // the leading cell's unfilled part is the same track and not a gap.
@@ -61,8 +60,12 @@ function srgb([L, a, b]) {
     ].map(toByte);
 }
 
-const FROM = oklab(BLEND_FROM);
-const TO = oklab(BLEND_TO);
+// The fill runs from a dim gold to the accent: the accent's own hue, at
+// lightness 0.55 and chroma 0.09 in OKLCH where the accent is 0.89 and 0.18.
+// Never grey, and the span is short enough that a few cells' steps stay soft.
+const TO = oklab(ACCENT);
+const HUE = Math.atan2(TO[2], TO[1]);
+const FROM = [0.55, 0.09 * Math.cos(HUE), 0.09 * Math.sin(HUE)];
 
 function blendAt(t) {
     return srgb(FROM.map((from, i) => from + (TO[i] - from) * t)).join(';');
