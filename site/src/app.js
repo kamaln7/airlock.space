@@ -10,11 +10,14 @@ const restart = document.getElementById('restart');
 // arrived, in a bar exactly as wide.
 //
 // The bar is Bubbles' progress bar (charm.land/bubbles/v2/progress) in this
-// palette: a fill blended across the bar's width, a track, and the shown
-// fraction chasing the real one on its critically damped spring (angular
-// frequency 18, damping ratio 1) rather than jumping with each chunk. Its
-// edge advances in eighths of a cell, so the motion is smooth even ten cells
-// wide.
+// palette, with its blend scaled to the filled part (WithScaled): the fill
+// runs the whole way from grey to the accent at every length, so its leading
+// edge is always the accent and a short bar is not just grey. Colours mix in
+// OKLab (Bubbles' Lip Gloss mixes in CIELAB), so the steps look even. The
+// shown fraction chases the real one on Bubbles' critically damped spring
+// (angular frequency 18, damping ratio 1) rather than jumping with each
+// chunk, and its edge advances in eighths of a cell, so the motion is smooth
+// even ten cells wide.
 const SPINNER_DELAY_MS = 500; // spinnerDelay in main.go
 const SPINNER_STEP_MS = 125; // spinnerStep in main.go
 const MOON = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
@@ -31,8 +34,38 @@ const SPRING_FREQUENCY = 18;
 let downloaded = 0; // the fraction of the program in hand
 let stopLoader = () => {};
 
+// OKLab, after Björn Ottosson: https://bottosson.github.io/posts/oklab/
+const toLinear = (c) => (c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+const toByte = (c) => Math.round(255 * Math.min(1, Math.max(0, c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055)));
+
+function oklab(rgb) {
+    const [r, g, b] = rgb.map(toLinear);
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ];
+}
+
+function srgb([L, a, b]) {
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+    const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+    const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+    return [
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    ].map(toByte);
+}
+
+const FROM = oklab(BLEND_FROM);
+const TO = oklab(BLEND_TO);
+
 function blendAt(t) {
-    return BLEND_FROM.map((from, i) => Math.round(from + (BLEND_TO[i] - from) * t)).join(';');
+    return srgb(FROM.map((from, i) => from + (TO[i] - from) * t)).join(';');
 }
 
 // Full cells are Bubbles' half block, its left half and right half each their
@@ -40,15 +73,14 @@ function blendAt(t) {
 function progressBar(fraction) {
     const eighths = Math.round(Math.max(0, Math.min(1, fraction)) * BAR_CELLS * 8);
     const full = Math.floor(eighths / 8);
-    const at = (half) => blendAt(half / (2 * BAR_CELLS - 1));
+    const partial = eighths % 8 > 0;
+    // the blend spans the half-cells filled, ending at the accent
+    const halves = 2 * full + (partial ? 1 : 0);
+    const at = (half) => blendAt(halves > 1 ? half / (halves - 1) : 1);
     let bar = '';
     for (let i = 0; i < full; i++) bar += `\x1b[38;2;${at(2 * i)};48;2;${at(2 * i + 1)}m▌`;
-    let cells = full;
-    if (eighths % 8) {
-        bar += `\x1b[${TRACK};38;2;${at(2 * full)}m${EIGHTHS[eighths % 8]}`;
-        cells++;
-    }
-    return `${bar}\x1b[39;${TRACK}m${' '.repeat(BAR_CELLS - cells)}\x1b[m`;
+    if (partial) bar += `\x1b[${TRACK};38;2;${at(2 * full)}m${EIGHTHS[eighths % 8]}`;
+    return `${bar}\x1b[39;${TRACK}m${' '.repeat(BAR_CELLS - full - (partial ? 1 : 0))}\x1b[m`;
 }
 
 function startLoader(term) {
