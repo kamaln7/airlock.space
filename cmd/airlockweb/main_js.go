@@ -34,6 +34,9 @@ func main() {
 		// the page has been waiting since it loaded, its loader up after the
 		// same delay: the program's first spinner carries that wait on
 		WaitingSince: time.UnixMilli(int64(js.Global().Get("performance").Get("timeOrigin").Float())),
+		// the key press that asks for this is the user activation the
+		// browser wants before it opens a tab; it is still current here
+		OpenURL: func(url string) { js.Global().Call("open", url, "_blank", "noopener") },
 	}
 	if _, err := booba.NewProgram(m,
 		tea.WithOutput(out),

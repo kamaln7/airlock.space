@@ -306,6 +306,25 @@ func TestFooterLinkClickCopiesNatively(t *testing.T) {
 	}
 }
 
+// in the browser the footer offers to open the day's article in a new tab,
+// where elsewhere it offers to copy its link
+func TestBrowserOffersOpenInNewTab(t *testing.T) {
+	m := testModel(t, day(2026, 8, 20))
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "c copy link") || strings.Contains(frame, "open in new tab") {
+		t.Error("outside the browser the footer should offer copying the link")
+	}
+
+	var opened string
+	m.OpenURL = func(url string) { opened = url }
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "o open in new tab") || strings.Contains(frame, "copy link") {
+		t.Error("in the browser the footer should offer opening the link in place of copying it")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if opened != m.apod.ArticleURL {
+		t.Errorf("o opened %q; want the day's article", opened)
+	}
+}
+
 func TestGoodbyeArticleURLIsClickable(t *testing.T) {
 	m := testModel(t, day(2026, 8, 20))
 	got := clickable(cellsOf(Goodbye(100, "goodbye-link", m.apod)))[m.apod.ArticleURL]

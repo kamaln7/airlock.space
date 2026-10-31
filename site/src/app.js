@@ -2,15 +2,25 @@ const status = document.getElementById('status');
 const restart = document.getElementById('restart');
 
 // The loader is the program's own first frame, drawn into the terminal before
-// the program is there to draw it: the same cell, glyphs and colours as
-// viewLoading in main.go, and the same clock - the moon's phase is wall time
-// in eighths of a second, and the program carries on the page's wait from
-// performance.timeOrigin - so the hand-over shows nothing at all.
+// the program is there to draw it: the same cell and colours as viewLoading in
+// main.go, and the same clock - the moon's phase is wall time in eighths of a
+// second, and the program carries on the page's wait from
+// performance.timeOrigin - so the hand-over shows nothing at all. Where the
+// program will say "loading...", the page shows how much of the program has
+// arrived, in a bar exactly as wide.
 const SPINNER_DELAY_MS = 500; // spinnerDelay in main.go
 const SPINNER_STEP_MS = 125; // spinnerStep in main.go
 const MOON = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
-const LABEL = 'loading...';
+const LABEL = 'loading...'; // the program's, which the bar stands in for
+const BAR_CELLS = LABEL.length - 1; // the last cell is the bar's end
+const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+let downloaded = 0; // the fraction of the program in hand
 let stopLoader = () => {};
+
+function progressBar(fraction) {
+    const eighths = Math.round(Math.min(1, fraction) * BAR_CELLS * 8);
+    return ('█'.repeat(Math.floor(eighths / 8)) + EIGHTHS[eighths % 8]).padEnd(BAR_CELLS) + '▏';
+}
 
 function startLoader(term) {
     let drawn = '';
@@ -18,16 +28,17 @@ function startLoader(term) {
         if (performance.now() < SPINNER_DELAY_MS) return;
         const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
         const moon = MOON[still ? 0 : Math.floor(Date.now() / SPINNER_STEP_MS) % MOON.length];
+        const bar = progressBar(downloaded);
         // lipgloss centring: the odd cell goes on the right
         const row = Math.floor(term.rows / 2) + 1;
         const col = Math.floor((term.cols - (2 + 1 + LABEL.length)) / 2) + 1;
-        const frame = `${row};${col};${moon}`;
+        const frame = `${row};${col};${moon};${bar}`;
         if (frame === drawn) return;
         // the alternate screen, as the program uses: it leaves the normal
         // screen clean for the goodbye
         const clear = drawn.startsWith(`${row};${col};`) ? '' : '\x1b[?1049h\x1b[?25l\x1b[2J';
         drawn = frame;
-        term.write(`${clear}\x1b[${row};${col}H\x1b[38;5;220m${moon}\x1b[m \x1b[38;2;92;92;92m${LABEL}\x1b[m`);
+        term.write(`${clear}\x1b[${row};${col}H\x1b[38;5;220m${moon}\x1b[m \x1b[38;2;92;92;92m${bar}\x1b[m`);
     };
     draw();
     const timer = setInterval(draw, 25);
@@ -140,11 +151,26 @@ async function start() {
         disableSelection: true,
     });
     const terminal = loadFonts().then(() => booba.init()).then(() => startLoader(booba));
-    const program = fetch(new URL('../.generated/app.wasm', import.meta.url)).then((response) => {
+    // Counted as the bytes come out of the response, which is after the
+    // browser has decompressed them, against the program's own size from the
+    // build: Content-Length is the compressed size, or absent when the server
+    // compresses on the fly.
+    const program = Promise.all([
+        fetch(new URL('../.generated/app.wasm', import.meta.url)),
+        import('../.generated/app-wasm-size.json'),
+    ]).then(([response, { default: size }]) => {
         if (!response.ok) {
             throw new Error(`app.wasm: HTTP ${response.status} ${response.statusText}`);
         }
-        return WebAssembly.instantiateStreaming(response, go.importObject);
+        let got = 0;
+        const counted = response.body.pipeThrough(new TransformStream({
+            transform(chunk, controller) {
+                got += chunk.byteLength;
+                downloaded = got / size.bytes;
+                controller.enqueue(chunk);
+            },
+        }));
+        return WebAssembly.instantiateStreaming(new Response(counted, { headers: response.headers }), go.importObject);
     });
     const [{ instance }] = await Promise.all([program, terminal]);
 

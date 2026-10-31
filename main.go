@@ -161,6 +161,10 @@ type Model struct {
 	// delay carries on from there rather than starting over, so the page's own
 	// loader hands over without a gap.
 	WaitingSince time.Time
+	// OpenURL opens a link in a new browser tab. Only the browser can, so only
+	// it sets this; where it is set, the footer offers that in place of
+	// copying the link.
+	OpenURL func(url string)
 
 	// Profile and isLight come from the terminal via bubbletea, not from the
 	// server's own environment. Stated the light way round so the zero value
@@ -375,6 +379,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyCopy):
 			if m.apod != nil {
 				cmds = append(cmds, m.copyLink())
+			}
+		case key.Matches(msg, keyOpen):
+			if m.apod != nil && m.OpenURL != nil {
+				m.OpenURL(m.apod.ArticleURL)
 			}
 		default:
 			// anything this app has no use for scrolls the explanation, where
@@ -747,6 +755,10 @@ var (
 		key.WithKeys("c"),
 		key.WithHelp("c", "copy link"),
 	)
+	keyOpen = key.NewBinding(
+		key.WithKeys("o"),
+		key.WithHelp("o", "open in new tab"),
+	)
 	// v2 asks the terminal for key disambiguation, so ctrl+shift+c finally
 	// arrives as itself rather than as ctrl+c. Kept off the help bar: whether
 	// it reaches us at all is the terminal's call.
@@ -1028,7 +1040,11 @@ func (m *Model) helpKeys() []key.Binding {
 		scroll.SetEnabled(m.explanationOnScreen())
 		keys = append(keys, scroll)
 	}
-	return append(keys, keyCopy, keyQuit) // q quit stays last
+	link := keyCopy
+	if m.OpenURL != nil {
+		link = keyOpen
+	}
+	return append(keys, link, keyQuit) // q quit stays last
 }
 
 // imageReady reports whether the picture on screen can be acted on: its bytes

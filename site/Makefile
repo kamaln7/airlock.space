@@ -9,3 +9,6 @@ wasm:
 	# Precise GC skips image bytes instead of treating them as possible pointers.
 	cd .. && tinygo build -target wasm -gc=precise -stack-size=512KB -no-debug -opt=z -trimpath -o site/.generated/app.wasm ./cmd/airlockweb
 	cp "$$(tinygo env TINYGOROOT)/targets/wasm_exec.js" .generated/wasm_exec.js
+	# The loader's progress bar counts the program's bytes as they arrive,
+	# decompressed; Content-Length is the compressed size, or absent.
+	printf '{"bytes": %s}\n' "$$(wc -c < .generated/app.wasm | tr -d ' ')" > .generated/app-wasm-size.json
