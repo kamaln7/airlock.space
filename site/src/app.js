@@ -10,7 +10,7 @@ const restart = document.getElementById('restart');
 // arrived, in a bar exactly as wide.
 //
 // The bar is Bubbles' progress bar (charm.land/bubbles/v2/progress) in this
-// palette: a fill blended across the bar's width, a ░ track, and the shown
+// palette: a fill blended across the bar's width, a track, and the shown
 // fraction chasing the real one on its critically damped spring (angular
 // frequency 18, damping ratio 1) rather than jumping with each chunk. Its
 // edge advances in eighths of a cell, so the motion is smooth even ten cells
@@ -23,7 +23,10 @@ const BAR_CELLS = LABEL.length;
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 const BLEND_FROM = [0x5c, 0x5c, 0x5c]; // colorMuted (dark) in main.go
 const BLEND_TO = [0xff, 0xd7, 0x00]; // ANSI 220, colorYellow in main.go
-const TRACK = '38;2;60;60;60'; // colorSuperMuted (dark) in main.go
+// The track is the shade Bubbles' ░ comes to here (colorSuperMuted at a
+// quarter over the page's ink), laid as a background rather than a glyph so
+// the leading cell's unfilled part is the same track and not a gap.
+const TRACK = '48;2;28;29;28';
 const SPRING_FREQUENCY = 18;
 let downloaded = 0; // the fraction of the program in hand
 let stopLoader = () => {};
@@ -42,10 +45,10 @@ function progressBar(fraction) {
     for (let i = 0; i < full; i++) bar += `\x1b[38;2;${at(2 * i)};48;2;${at(2 * i + 1)}m▌`;
     let cells = full;
     if (eighths % 8) {
-        bar += `\x1b[49;38;2;${at(2 * full)}m${EIGHTHS[eighths % 8]}`;
+        bar += `\x1b[${TRACK};38;2;${at(2 * full)}m${EIGHTHS[eighths % 8]}`;
         cells++;
     }
-    return `${bar}\x1b[49;${TRACK}m${'░'.repeat(BAR_CELLS - cells)}\x1b[m`;
+    return `${bar}\x1b[39;${TRACK}m${' '.repeat(BAR_CELLS - cells)}\x1b[m`;
 }
 
 function startLoader(term) {
