@@ -1228,21 +1228,23 @@ func TestKittyChunksAreWellFormed(t *testing.T) {
 	}
 }
 
-// the notice sits over the middle of the picture, on top of the art rather
-// than in place of it, and only once the send is slow enough to be worth
-// mentioning
+// over ssh the notice sits over the middle of the picture, on top of the art
+// rather than in place of it, from the moment the photo is sent
 func TestSendingNoticeSitsOverThePicture(t *testing.T) {
 	m := besideImage(t, 130, 34)
-	m.preferArt, m.kittyReady = false, false
+	m.Remote = true
+	m.KittyGraphics, m.preferArt = false, true
+	drawArt(t, m) // art on screen, as when the reader asks for the photo
+	m.KittyGraphics, m.preferArt, m.kittyReady = true, false, false
 	if cmd := m.sendKitty(); cmd == nil {
 		t.Fatal("nothing to send")
 	}
 	if m.photoSince.IsZero() {
 		t.Fatal("sending the photo did not start the clock")
 	}
-	// up at once, unlike a spinner: what decides how long it shows is the
-	// picture travelling, which is never nothing, and it is written ahead of
-	// those bytes so it is on screen for all of it
+	// up at once over ssh, unlike a spinner: what decides how long it shows is
+	// the picture travelling, which is never nothing, and it is written ahead
+	// of those bytes so it is on screen for all of it
 	busy := m.baseView()
 	if !strings.Contains(ansi.Strip(busy), "loading photo") {
 		t.Fatal("no notice while the photo is on its way")
@@ -1267,6 +1269,23 @@ func TestSendingNoticeSitsOverThePicture(t *testing.T) {
 	// size either way
 	if a, b := countLines(quiet), countLines(busy); a != b {
 		t.Errorf("frame is %d rows while sending, %d otherwise", b, a)
+	}
+}
+
+// locally the send is the whole wait, so the notice waits its turn like any
+// other indicator
+func TestLocalSendingNoticeWaitsForSlowness(t *testing.T) {
+	m := besideImage(t, 130, 34)
+	m.KittyGraphics, m.preferArt = false, true
+	drawArt(t, m)
+	m.KittyGraphics, m.preferArt, m.kittyReady = true, false, false
+	m.sendKitty()
+	if strings.Contains(ansi.Strip(m.baseView()), "loading photo") {
+		t.Error("a notice for a send that has not been slow")
+	}
+	m.photoWait.since = time.Now().Add(-spinnerDelay)
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading photo") {
+		t.Error("no notice for a send that is slow")
 	}
 }
 
@@ -1358,6 +1377,7 @@ func drawArt(t *testing.T, m *Model) {
 func TestResizeHoldsTheArtStill(t *testing.T) {
 	m := besideImage(t, 130, 30)
 	m.KittyGraphics, m.kittyReady, m.preferArt = false, false, true
+	m.apod.Date = day(2001, 1, 3) // the render cache is shared: a day no other test draws
 
 	drawArt(t, m)
 	drawn := m.lastArt
@@ -1532,9 +1552,40 @@ func TestFastDayDoesNotFlashASpinner(t *testing.T) {
 	}
 
 	// once it really is slow, say so
-	m.daySince = time.Now().Add(-loadingDelay)
+	m.dayWait.since = time.Now().Add(-spinnerDelay)
 	if !strings.Contains(ansi.Strip(m.baseView()), "loading") {
 		t.Error("no spinner for a day that is genuinely taking its time")
+	}
+
+	// and the day landing a moment later does not blink it away: it stays
+	// its minimum, then the day appears
+	next := &apod.APOD{Picture: apodclient.Picture{Title: "Another Day", Date: m.date}, Explanation: "more words"}
+	m.Update(apodMsg{date: m.date, apod: next})
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading") {
+		t.Error("the spinner blinked: gone the moment after it appeared")
+	}
+	m.dayWait.shown = time.Now().Add(-spinnerMinShow)
+	if frame := ansi.Strip(m.baseView()); !strings.Contains(frame, "Another Day") {
+		t.Error("the day did not appear once the spinner had had its minimum")
+	}
+}
+
+// the picture's box waits on its bytes and then on its art, one wait: a
+// spinner that has come up stays up across the two rather than going blank
+// between them and coming back
+func TestPictureBoxWaitIsOneWait(t *testing.T) {
+	m := besideImage(t, 130, 30)
+	m.KittyGraphics, m.kittyReady, m.preferArt = false, false, true
+	m.apod.Date = day(2001, 1, 2) // the render cache is shared: a day no other test draws
+	m.imageOK = false
+	m.baseView()
+	m.boxWait.since = time.Now().Add(-spinnerDelay)
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading") {
+		t.Fatal("no spinner for bytes that are slow")
+	}
+	m.imageOK = true // bytes in, art not made yet
+	if !strings.Contains(ansi.Strip(m.baseView()), "loading") {
+		t.Error("the spinner went away between the bytes and the art")
 	}
 }
 
@@ -1715,7 +1766,9 @@ func TestExplanationHoldsItsPlaceOnceThePictureSizeIsKnown(t *testing.T) {
 		t.Fatal("no explanation row")
 		return -1, -1
 	}
-	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}} {
+	// tall beside the text, wide over it, and a panorama: bound by the width,
+	// so shorter than the rows the stacked layout gives it
+	for _, sz := range []image.Point{{X: 1059, Y: 1641}, {X: 3000, Y: 900}, {X: 6000, Y: 900}} {
 		m := besideImage(t, 151, 40)
 		m.apod.ImageSize = sz
 		m.imageOK = false // the size came with the day; the bytes have not

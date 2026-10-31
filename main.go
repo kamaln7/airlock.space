@@ -199,7 +199,9 @@ type Model struct {
 	clipped        string
 	sentW, sentH   int       // the pixel box the photo on screen was encoded for
 	resizeGen      int       // which resize the pending settle belongs to
-	daySince       time.Time // when the day on screen started loading
+	dayWait        spinDelay // the page waiting on a day
+	boxWait        spinDelay // the picture's box waiting on something to draw
+	photoWait      spinDelay // the photo on its way to the terminal
 	photoSince     time.Time // when the photo started on its way
 	placedCols     int       // current kitty virtual placement size
 	placedRows     int
@@ -207,7 +209,6 @@ type Model struct {
 	artWant        artJob     // the art the last frame wanted and did not have
 	artPending     string     // the art being rendered
 	artFailed      string     // art that could not be rendered, not to be tried again
-	artSince       time.Time  // when the frame started waiting for art
 	lastArtFor     *apod.APOD // the day lastArt was drawn for
 	spinFrame      int
 }
@@ -281,7 +282,7 @@ func (m *Model) Init() tea.Cmd {
 	// New, not the zero value: a zero viewport sets itself up on its first
 	// Update, and that setup replaces explKeyMap with the stock keys
 	m.vp = viewport.New()
-	m.daySince = time.Now()
+	m.dayWait = spinDelay{since: time.Now()}
 	return tea.Batch(m.loadAPOD(m.date), spinTick(), tea.RequestBackgroundColor, requestCellSize)
 }
 
@@ -426,6 +427,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.latest = msg.apod.Date // NASA posted a new one under us
 		}
 		m.imageOK = false
+		m.boxWait = spinDelay{} // a new day's box starts its own wait
 		m.hasImage = msg.hasImage
 		m.kittyReady = false
 		m.sentW, m.sentH = 0, 0
@@ -531,7 +533,7 @@ func (m *Model) showDay(date time.Time) tea.Cmd {
 	}
 	m.date = date
 	m.State = StateLoading
-	m.daySince = time.Now()
+	m.dayWait = spinDelay{since: time.Now()}
 	return m.loadAPOD(date)
 }
 
@@ -675,6 +677,7 @@ func (m *Model) sendKitty() tea.Cmd {
 	a, out := m.apod, m.Session
 	m.sentW, m.sentH = w, h
 	m.photoSince = time.Now()
+	m.photoWait = spinDelay{since: m.photoSince}
 	return func() tea.Msg {
 		img, err := a.Decode()
 		if err != nil {
@@ -908,30 +911,29 @@ func (m *Model) viewAPOD() string {
 // imagePane is the picture in a box of its own height, never a taller one:
 // padding it to the rows available would centre it, which puts blank rows
 // above and below the picture and drops its top edge below the text beside it.
-// Only the spinner, which has no size of its own, gets the full box.
+// The wait for it takes the same box, the picture's fitted size, so nothing
+// around it moves when the picture lands.
 func (m *Model) imagePane(w, h int) string {
 	if !m.imageOK {
-		return m.spinnerBox(w, h, m.daySince)
+		c, r := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, w, h, m.cellAspect())
+		return txt.Width(w).Align(lipgloss.Center).Render(m.spinnerBox(c, r, m.boxWait.show(true)))
 	}
 	return txt.Width(w).Align(lipgloss.Center).Render(m.picture(w, h))
 }
 
-// spinnerBox fills a box with the loading spinner, once whatever started at
-// since has been going long enough to mention; blank before that, since most
-// waits are over in a moment and a spinner would only flicker.
-func (m *Model) spinnerBox(w, h int, since time.Time) string {
+// spinnerBox is a box of the given size, blank or with the spinner centred.
+func (m *Model) spinnerBox(w, h int, spinner bool) string {
 	box := txt.Width(w).Height(h)
-	if !worthMentioning(since) {
+	if !spinner {
 		return box.Render("")
 	}
 	return box.Align(lipgloss.Center, lipgloss.Center).Render(m.loadingLine())
 }
 
-// dayLoading reports whether the page is waiting on another day long enough to
-// say so. Held back a moment: most days are in hand and arrive in a
-// millisecond, and a spinner between them is just a flicker.
+// dayLoading reports whether the page shows another day on its way. Until
+// that is worth saying, the day already on screen stays.
 func (m *Model) dayLoading() bool {
-	return m.State == StateLoading && worthMentioning(m.daySince)
+	return m.dayWait.show(m.State == StateLoading)
 }
 
 // viewLinkLine is the clickable URL shown under the explanation, with inline
@@ -1340,32 +1342,58 @@ func (m *Model) viewExplanation(width, maxHeight int) string {
 	return m.vp.View()
 }
 
-// loadingDelay is how long something may take before it is worth saying so.
-// Under it, a spinner or a banner is a flash and nothing more - the reader
-// sees a flicker where they should have seen the thing they asked for.
-const loadingDelay = 100 * time.Millisecond
+// Loading indicators follow the delay-then-minimum pattern (spin-delay's
+// defaults; NN/g's line that a looped animation for anything under a second
+// is a distracting flash): a wait shows nothing until it has lasted
+// spinnerDelay, so a fast one goes unannounced, and an indicator once shown
+// stays for spinnerMinShow, so a wait ending just past the delay does not
+// blink. Until then the content already on screen stays, as React keeps
+// revealed content during a transition rather than swapping in a fallback.
+const (
+	spinnerDelay   = 500 * time.Millisecond
+	spinnerMinShow = 200 * time.Millisecond
+)
 
-// worthMentioning reports whether work started at t has been going long enough
-// to be worth telling the reader about. Zero means nothing is running.
-func worthMentioning(t time.Time) bool {
-	return !t.IsZero() && time.Since(t) >= loadingDelay
+// spinDelay is one place that can show a loading indicator. Asked every frame
+// whether its wait is still on, it answers whether the indicator is up.
+type spinDelay struct{ since, shown time.Time }
+
+func (s *spinDelay) show(waiting bool) bool {
+	now := time.Now()
+	if waiting {
+		if s.since.IsZero() {
+			s.since = now
+		}
+		if s.shown.IsZero() && now.Sub(s.since) >= spinnerDelay {
+			s.shown = now
+		}
+		return !s.shown.IsZero()
+	}
+	if !s.shown.IsZero() && now.Sub(s.shown) < spinnerMinShow {
+		return true
+	}
+	*s = spinDelay{}
+	return false
 }
 
-// picture is the image area with the sending notice laid over the middle of it
-// while the real photo is on its way.
+// picture is the image area, with its waits shown the way every wait is (see
+// spinDelay): the box's own wait for something to draw as a spinner in it, and
+// the photo on its way over art as a notice on top of that art.
 //
-// Not held back the tenth of a second a spinner is: that delay asks how long
-// we have been busy, and here that is the wrong clock. The sending is over in
-// a moment - the bytes are in the pipe, not on the screen - while the client
-// spends whatever it spends drawing megabytes. The notice is written ahead of
-// them and taken away after, so what governs how long it shows is the picture
-// travelling, and the answer is never nothing. Sextant art is what is on screen until
-// it lands, so the notice goes on top of that rather than replacing it: the
-// reader keeps the picture and gains the reason it is about to change.
+// Over ssh the notice is up at once. The delay asks how long we have been
+// busy, and there that is the wrong clock: the sending is over in a moment -
+// the bytes are in the pipe, not on the screen - while the client spends
+// whatever it spends receiving megabytes. Written ahead of them and taken away
+// after, the notice shows for as long as the picture travels. Locally the
+// sending is the whole wait, and the usual delay applies.
 func (m *Model) picture(w, h int) string {
-	art := m.imageArea(w, h)
-	if m.photoSince.IsZero() {
-		return art
+	cells, waiting := m.imageArea(w, h)
+	if m.boxWait.show(waiting) {
+		return m.spinnerBox(lipgloss.Width(cells), lipgloss.Height(cells), true)
+	}
+	sending := !waiting && !m.photoSince.IsZero()
+	if !m.photoWait.show(sending) && !(sending && m.Remote) {
+		return cells
 	}
 	notice := m.txtYellow().Bold(true).
 		Border(lipgloss.RoundedBorder()).
@@ -1373,7 +1401,7 @@ func (m *Model) picture(w, h int) string {
 		Padding(0, 2).
 		Render("loading photo\u2026")
 
-	return overlayCenter(art, notice)
+	return overlayCenter(cells, notice)
 }
 
 // clipTo cuts art down to a box of cells, for showing a render made for some
@@ -1417,7 +1445,11 @@ func (m *Model) loadingLine() string {
 	return m.spinnerView() + " " + m.txtMuted().Render("loading...")
 }
 
+// viewLoading is the first load, before there is a day to keep on screen.
 func (m *Model) viewLoading() string {
+	if !m.dayWait.show(true) {
+		return txt.Width(m.Width).Height(m.Height).Render("")
+	}
 	// spinner pinned to the exact screen center so it doesn't jump when the
 	// view transitions to the image-loading phase
 	pad := max(0, m.Height/2)
@@ -1559,15 +1591,17 @@ func (m *Model) applyArtDefault() {
 }
 
 // imageArea renders the APOD image into a box of cols x rows cells: a kitty
-// graphics placement when the client supports it, sextant art otherwise.
-func (m *Model) imageArea(cols, rows int) string {
+// graphics placement when the client supports it, sextant art otherwise. When
+// there is nothing to draw yet it says it is waiting, with a blank box of the
+// picture's size for picture to show that wait in.
+func (m *Model) imageArea(cols, rows int) (cells string, waiting bool) {
 	// both paths get the same aspect-correct box. Handing kitty the whole box
 	// and letting it scale looks tempting - it knows its own cell metrics -
 	// but the protocol stretches an image to fill whatever c x r it is given
 	// once both are named, so the box itself has to carry the aspect ratio.
 	c, r := fitCells(m.apod.ImageSize.X, m.apod.ImageSize.Y, cols, rows, m.cellAspect())
 	if c < 1 || r < 1 {
-		return ""
+		return "", false
 	}
 
 	if m.kittyReady && !m.preferArt {
@@ -1577,14 +1611,14 @@ func (m *Model) imageArea(cols, rows int) string {
 			io.WriteString(m.Session, kittyVirtualPlacement(c, r))
 			m.placedCols, m.placedRows = c, r
 		}
-		return kittyPlaceholders(c, r)
+		return kittyPlaceholders(c, r), false
 	}
 
 	date, mode := m.apod.Date.Format(time.DateOnly), canvasMode(m.Profile)
 	if s, ok := sextantCached(date, c, r, mode); ok {
-		m.artWant, m.artSince = artJob{}, time.Time{}
+		m.artWant = artJob{}
 		m.lastArt, m.lastArtFor, m.clipKey = strings.TrimSuffix(s, "\n"), m.apod, ""
-		return m.lastArt
+		return m.lastArt, false
 	}
 
 	// art is a jpeg decode and a pass through chafa: never made inside a
@@ -1595,16 +1629,13 @@ func (m *Model) imageArea(cols, rows int) string {
 	job := artJob{key: sextantKey(date, c, r, mode), apod: m.apod, cols: c, rows: r, mode: mode}
 	switch {
 	case job.key == m.artFailed:
-		return m.txtMuted().Render("image unavailable :(")
+		return m.txtMuted().Render("image unavailable :("), false
 	case !m.preferArt && !m.photoSince.IsZero():
-		// the photo is on its way and is what will be shown; its notice
-		// goes over this box, and there is no art worth making meanwhile
-		return txt.Width(c).Height(r).Render("")
+		// the photo is on its way and is what will be shown: no art worth
+		// making meanwhile
+		return m.spinnerBox(c, r, false), true
 	case !m.resizing:
 		m.artWant = job
-		if m.artSince.IsZero() {
-			m.artSince = time.Now()
-		}
 	}
 
 	// this day's art from a moment ago, cut to the new box, stands in until
@@ -1614,9 +1645,9 @@ func (m *Model) imageArea(cols, rows int) string {
 		if key := fmt.Sprintf("%dx%d", c, r); key != m.clipKey {
 			m.clipKey, m.clipped = key, clipTo(m.lastArt, c, r)
 		}
-		return m.clipped
+		return m.clipped, false
 	}
-	return m.spinnerBox(c, r, m.artSince)
+	return m.spinnerBox(c, r, false), true
 }
 
 // wantArt starts making the art the last frame asked for, once. It runs at the
